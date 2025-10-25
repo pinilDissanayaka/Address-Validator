@@ -153,7 +153,7 @@ class AddressValidator:
         Check if address is valid based on validation rules:
         - Must have Province
         - Must have City/Municipality
-        - Must have Barangay
+        - Must have Barangay that is validated against PhilAtlas
         - Must have Street Address
         """
         required_fields = ['province', 'city', 'barangay', 'street_address']
@@ -161,8 +161,13 @@ class AddressValidator:
         
         if missing_fields:
             logger.debug(f"Address validation failed. Missing fields: {', '.join(missing_fields)}")
+            return False
         
-        return all(validated_data.get(field) for field in required_fields)
+        if not validated_data.get('barangay_validated', False):
+            logger.debug(f"Address validation failed. Barangay '{validated_data.get('barangay')}' not found in PhilAtlas")
+            return False
+        
+        return True
     
     def _format_address(self, validated_data: Dict[str, Optional[str]]) -> str:
         """

@@ -116,7 +116,7 @@ class PhilAtlasClient:
         
         provinces = []
         
-        links = soup.find_all('a', href=re.compile(r'/(luzon|visayas|mindanao)/[^/]+/[^/]+\.html'))
+        links = soup.find_all('a', href=re.compile(r'^(luzon|visayas|mindanao)/[^/]+/[^/]+\.html'))
         
         for link in links:
             province_name = link.get_text(strip=True)
@@ -124,6 +124,9 @@ class PhilAtlasClient:
             
             if not province_name or not province_url:
                 continue
+            
+            if not province_url.startswith('/'):
+                province_url = '/' + province_url
             
             url_parts = province_url.split('/')
             region = url_parts[2] if len(url_parts) > 2 else 'unknown'
@@ -135,8 +138,17 @@ class PhilAtlasClient:
                 'code': self._normalize_name(province_name).upper().replace(' ', '_')
             })
         
-        ncr_link = soup.find('a', href=re.compile(r'/luzon/ncr\.html'))
+
+        ncr_link = soup.find('a', href=re.compile(r'^luzon/ncr\.html'))
         if ncr_link:
+            provinces.append({
+                'name': 'Metro Manila',
+                'url': '/luzon/ncr.html',
+                'region': 'NCR',
+                'code': 'METRO_MANILA'
+            })
+        else:
+            logger.info("NCR link not found on provinces page, adding manually")
             provinces.append({
                 'name': 'Metro Manila',
                 'url': '/luzon/ncr.html',
@@ -165,7 +177,6 @@ class PhilAtlasClient:
         
         provinces = self.get_provinces()
         
-        # Exact match first
         for province in provinces:
             if self._normalize_name(province['name']) == normalized_query:
                 logger.info(f"Found exact province match: {province['name']}")
@@ -223,7 +234,7 @@ class PhilAtlasClient:
         
         cities = []
         
-        city_links = soup.find_all('a', href=re.compile(r'/[^/]+/[^/]+/[^/]+\.html'))
+        city_links = soup.find_all('a', href=re.compile(r'^/?[^/]+/[^/]+/[^/]+\.html'))
         
         for link in city_links:
             city_name = link.get_text(strip=True)
@@ -231,6 +242,9 @@ class PhilAtlasClient:
             
             if not city_name or not city_url:
                 continue
+            
+            if not city_url.startswith('/'):
+                city_url = '/' + city_url
             
             if city_url == province_url or city_url.count('/') < 3:
                 continue
@@ -308,7 +322,7 @@ class PhilAtlasClient:
         Fetch barangays from a city page.
 
         Args:
-            city_url: URL of the city page (e.g., '/luzon/ncr.html')
+            city_url: URL of the city page (e.g., '/luzon/ncr/quezon-city.html')
 
         Returns:
             List of barangay dictionaries
@@ -330,16 +344,19 @@ class PhilAtlasClient:
         if barangay_section:
             table = barangay_section.find_next('table')
             if table:
-                rows = table.find_all('tr')
-                for row in rows:
-                    cells = row.find_all('td')
-                    if cells:
-                        barangay_name = cells[0].get_text(strip=True)
-                        if barangay_name and barangay_name not in ['Barangay', 'Name']:
-                            barangays.append({
-                                'name': barangay_name,
-                                'code': self._normalize_name(barangay_name).upper().replace(' ', '_')
-                            })
+                headers = table.find_all('th')
+                
+                for i, th in enumerate(headers):
+                    if i < 6: 
+                        continue
+                    
+                    barangay_name = th.get_text(strip=True)
+                    
+                    if barangay_name and 'Total' not in barangay_name and barangay_name:
+                        barangays.append({
+                            'name': barangay_name,
+                            'code': self._normalize_name(barangay_name).upper().replace(' ', '_')
+                        })
         
         logger.debug(f"Found {len(barangays)} barangays")
         return barangays
