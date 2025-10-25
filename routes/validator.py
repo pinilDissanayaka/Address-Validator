@@ -1,0 +1,53 @@
+from fastapi import APIRouter, HTTPException
+import logging
+from schema import AddressValidationRequest, AddressValidationResponse
+from utils import AddressParser, PSGCClient, AddressValidator
+
+logger = logging.getLogger(__name__)
+
+validate_router=APIRouter(
+    prefix="/validator",
+    tags=["validator"]
+)
+
+parser: AddressParser=None
+psgc_client: PSGCClient =None
+validator: AddressValidator = None
+
+@validate_router.on_event("startup")
+async def startup_event():
+    global parser, psgc_client, validator
+    logger.info("Initializing validator components...")
+    parser = AddressParser()
+    psgc_client = PSGCClient()
+    validator = AddressValidator(parser, psgc_client)
+    logger.info("Validator components initialized successfully")
+    
+
+@validate_router.post("/address", response_model=AddressValidationResponse)
+async def validate_address(request: AddressValidationRequest):
+    """
+    Validate a Philippine address
+    
+    Accepts unstructured address text and returns structured, validated components.
+    
+    - **address**: Raw address text (e.g., "Unit 405, 23rd St., Barangay Libis, Quezon City, Metro Manila")
+    
+    Returns structured address with validation status.
+    """
+    try:
+        if not request.address or not request.address.strip():
+            logger.warning("Empty address validation attempt")
+            raise HTTPException(status_code=400, detail="Address cannot be empty")
+        
+        logger.info(f"Validating address: {request.address[:50]}...")
+        global validator
+        result = await validator.validate_address(request.address)
+        logger.info(f"Address validation result: isValid={result.isValid}")
+        return result
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error validating address: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
