@@ -2,22 +2,22 @@ from typing import Optional, Dict, Any
 import logging
 from schema import AddressValidationResponse, ParsedAddress
 from utils.address_parser import AddressParser
-from utils.psgc_client import PSGCClient
+from utils.philatlas_client import PhilAtlasClient
 from utils.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class AddressValidator:
-    def __init__(self, parser: AddressParser, psgc_client: PSGCClient):
+    def __init__(self, parser: AddressParser, philatlas_client: PhilAtlasClient):
         """
         Initializes an AddressValidator instance
         :param parser: An instance of AddressParser to parse addresses
-        :param psgc_client: An instance of PSGCClient to interact with the PSGC API
+        :param philatlas_client: An instance of PhilAtlasClient to interact with PhilAtlas
         """
         self.parser = parser
-        self.psgc_client = psgc_client
-        logger.info("AddressValidator initialized")
+        self.philatlas_client = philatlas_client
+        logger.info("AddressValidator initialized with PhilAtlas client")
     
     def _normalize_name(self, name: Optional[str]) -> Optional[str]:
         """
@@ -64,7 +64,7 @@ class AddressValidator:
         """
         Main validation method:
         1. Parse the address using LLM
-        2. Validate each component against PSGC data
+        2. Validate each component against PhilAtlas data
         3. Return structured response
         """
         logger.debug(f"Starting address validation for: {address_text[:50]}...")
@@ -94,60 +94,104 @@ class AddressValidator:
     
     def _validate_components(self, parsed: ParsedAddress) -> Dict[str, Optional[str]]:
         """
-        Validate each component against PSGC data
-        Returns a dictionary with validated/normalized component names
+        Validate each component against PhilAtlas data with hierarchical validation.
+        Ensures barangay belongs to city, and city belongs to province.
+        Returns a dictionary with validated/normalized component names.
         """
-        logger.debug("Starting component validation against PSGC data")
+        logger.debug("Starting component validation against PhilAtlas data")
         result = {
             'province': None,
             'city': None,
             'barangay': None,
             'street_address': parsed.street_address,
             'postal_code': parsed.postal_code,
-            'province_code': None,
-            'city_code': None,
-            'barangay_validated': False
+            'province_validated': False,
+            'city_validated': False,
+            'barangay_validated': False,
+            'hierarchy_valid': False
         }
         
+        province_data = None
         if parsed.province:
             logger.debug(f"Validating province: {parsed.province}")
-            province_match = self.psgc_client.search_province(parsed.province)
-            if province_match and isinstance(province_match, dict):
-                result['province'] = self._normalize_name(province_match.get('name'))
-                result['province_code'] = province_match.get('code')
-                logger.info(f"Province validated: {parsed.province} -> {result['province']} (code: {result['province_code']})")
+            province_data = self.philatlas_client.search_province(parsed.province)
+            if province_data:
+                result['province'] = self._normalize_name(province_data.get('name'))
+                result['province_validated'] = True
+                logger.info(f"Province validated: {parsed.province} -> {result['province']}")
             else:
                 result['province'] = self._normalize_name(parsed.province)
-                logger.warning(f"Province not found in PSGC: {parsed.province}")
+                logger.warning(f"Province not found in PhilAtlas: {parsed.province}")
         
+        city_data = None
         if parsed.city:
             logger.debug(f"Validating city: {parsed.city}")
-            city_match = self.psgc_client.search_city_municipality(
+            city_data = self.philatlas_client.search_city_municipality(
                 parsed.city, 
-                result.get('province_code')
+                result.get('province')
             )
-            if city_match and isinstance(city_match, dict):
-                result['city'] = self._normalize_name(city_match.get('name'))
-                result['city_code'] = city_match.get('code')
-                logger.info(f"City validated: {parsed.city} -> {result['city']} (code: {result['city_code']})")
+            if city_data:
+                result['city'] = self._normalize_name(city_data.get('name'))
+                
+                if province_data and city_data.get('province'):
+                    city_province = self._normalize_name(city_data.get('province'))
+                    expected_province = self._normalize_name(province_data.get('name'))
+                    if city_province == expected_province:
+                        result['city_validated'] = True
+                        logger.info(f"City validated and belongs to province: {result['city']} -> {result['province']}")
+                    else:
+                        logger.warning(f"City '{result['city']}' does not belong to province '{result['province']}'. City's actual province: {city_data.get('province')}")
+                        result['city_validated'] = False
+                elif not province_data:
+                    result['city_validated'] = True
+                    logger.info(f"City validated: {parsed.city} -> {result['city']}")
+                else:
+                    result['city_validated'] = True
+                    logger.info(f"City validated: {parsed.city} -> {result['city']}")
             else:
                 result['city'] = self._normalize_name(parsed.city)
-                logger.warning(f"City not found in PSGC: {parsed.city}")
+                logger.warning(f"City not found in PhilAtlas: {parsed.city}")
         
         if parsed.barangay:
             logger.debug(f"Validating barangay: {parsed.barangay}")
-            barangay_match = self.psgc_client.search_barangay(
+            barangay_data = self.philatlas_client.search_barangay(
                 parsed.barangay,
-                result.get('city_code')
+                result.get('city'),
+                result.get('province')
             )
-            if barangay_match and isinstance(barangay_match, dict):
-                result['barangay'] = self._normalize_name(barangay_match.get('name'))
-                result['barangay_validated'] = True
-                logger.info(f"Barangay validated: {parsed.barangay} -> {result['barangay']}")
+            if barangay_data:
+                result['barangay'] = self._normalize_name(barangay_data.get('name'))
+                
+                if city_data and barangay_data.get('city'):
+                    barangay_city = self._normalize_name(barangay_data.get('city'))
+                    expected_city = self._normalize_name(city_data.get('name'))
+                    if barangay_city == expected_city:
+                        result['barangay_validated'] = True
+                        logger.info(f"Barangay validated and belongs to city: {result['barangay']} -> {result['city']}")
+                    else:
+                        logger.warning(f"Barangay '{result['barangay']}' does not belong to city '{result['city']}'. Barangay's actual city: {barangay_data.get('city')}")
+                        result['barangay_validated'] = False
+                elif not city_data:
+                    logger.warning(f"Barangay found but city not validated")
+                    result['barangay_validated'] = False
+                else:
+                    result['barangay_validated'] = True
+                    logger.info(f"Barangay validated: {parsed.barangay} -> {result['barangay']}")
             else:
                 result['barangay'] = self._normalize_name(parsed.barangay)
                 result['barangay_validated'] = False
-                logger.warning(f"Barangay not found in PSGC: {parsed.barangay}")
+                logger.warning(f"Barangay not found in PhilAtlas: {parsed.barangay}")
+        
+        result['hierarchy_valid'] = (
+            result['province_validated'] and 
+            result['city_validated'] and 
+            result['barangay_validated']
+        )
+        
+        if result['hierarchy_valid']:
+            logger.info("Hierarchical validation successful: Province -> City -> Barangay")
+        else:
+            logger.warning(f"Hierarchical validation failed. Province: {result['province_validated']}, City: {result['city_validated']}, Barangay: {result['barangay_validated']}")
         
         return result
     
@@ -158,14 +202,21 @@ class AddressValidator:
         - Must have City/Municipality
         - Must have Barangay
         - Must have Street Address
+        - Barangay must belong to City
+        - City must belong to Province
         """
         required_fields = ['province', 'city', 'barangay', 'street_address']
         missing_fields = [field for field in required_fields if not validated_data.get(field)]
         
         if missing_fields:
             logger.debug(f"Address validation failed. Missing fields: {', '.join(missing_fields)}")
+            return False
         
-        return all(validated_data.get(field) for field in required_fields)
+        if not validated_data.get('hierarchy_valid', False):
+            logger.debug("Address validation failed. Hierarchical validation failed (barangay must belong to city, city must belong to province)")
+            return False
+        
+        return True
     
     def _format_address(self, validated_data: Dict[str, Optional[str]]) -> str:
         """

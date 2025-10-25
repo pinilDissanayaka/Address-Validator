@@ -1,11 +1,11 @@
 from .address_parser import AddressParser
-from .psgc_client import PSGCClient
+from .philatlas_client import PhilAtlasClient
 from .validator import AddressValidator
 from .config import settings
 
 __all__ = [
     'AddressParser',
-    'PSGCClient',
+    'PhilAtlasClient',
     'AddressValidator',
     'settings'
 ]

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 import logging
 from schema import AddressValidationRequest, AddressValidationResponse
-from utils import AddressParser, PSGCClient, AddressValidator
+from utils import AddressParser, PhilAtlasClient, AddressValidator
 
 logger = logging.getLogger(__name__)
 
@@ -11,16 +11,22 @@ validate_router=APIRouter(
 )
 
 parser: AddressParser=None
-psgc_client: PSGCClient =None
+philatlas_client: PhilAtlasClient = None
 validator: AddressValidator = None
 
 @validate_router.on_event("startup")
 async def startup_event():
-    global parser, psgc_client, validator
+    global parser, philatlas_client, validator
     logger.info("Initializing validator components...")
     parser = AddressParser()
-    psgc_client = PSGCClient()
-    validator = AddressValidator(parser, psgc_client)
+    
+    # Initialize PhilAtlas client
+    from utils.config import settings
+    logger.info("Initializing PhilAtlas client...")
+    philatlas_client = PhilAtlasClient(timeout=settings.PHILATLAS_TIMEOUT)
+    logger.info("PhilAtlas client initialized")
+    
+    validator = AddressValidator(parser, philatlas_client)
     logger.info("Validator components initialized successfully")
     
 

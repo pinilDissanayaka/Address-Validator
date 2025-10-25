@@ -12,7 +12,7 @@ class Settings:
 
     API_TITLE = "Philippine Address Validator API"
     API_VERSION = "1.0.0"
-    API_DESCRIPTION = "Validates and structures unstructured Philippine addresses using PSGC data"
+    API_DESCRIPTION = "Validates and structures unstructured Philippine addresses using PhilAtlas data"
 
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", "8000"))
@@ -21,8 +21,8 @@ class Settings:
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0"))
 
-    PSGC_BASE_URL = os.getenv("PSGC_BASE_URL")
-    PSGC_TIMEOUT = float(os.getenv("PSGC_TIMEOUT"))
+    PHILATLAS_BASE_URL = os.getenv("PHILATLAS_BASE_URL", "https://philatlas.ph")
+    PHILATLAS_TIMEOUT = float(os.getenv("PHILATLAS_TIMEOUT", "10.0"))
 
     CITY_ABBREVIATIONS: Dict[str, str] = {
         'qc': 'quezon city',
