@@ -37,7 +37,7 @@ class AddressParser:
                 - Region (e.g., "NCR", "Region IV-A", "Metro Manila")
                 - Province (e.g., "Metro Manila", "Cavite", "Batangas")
                 - City/Municipality (e.g., "Quezon City", "Makati", "City of Manila")
-                - Barangay (e.g., "Libis", "Baclaran", "San Antonio")
+                - Barangay (e.g., "Libis", "Baclaran", "San Antonio", "Barangay 175")
                 - Street Address (e.g., "Unit 405, 23rd Street", "123 Main Ave")
                 - Postal Code (e.g., "1102", "4000")
 
@@ -50,6 +50,18 @@ class AddressParser:
                 6. If a component cannot be identified, set it to null
                 7. Normalize casing: use Title Case for proper nouns
                 8. For cities/municipalities, determine which one it is based on context
+                
+                CRITICAL BARANGAY EXTRACTION RULES:
+                9. Some cities (like Caloocan, Manila, Navotas) use NUMBERED barangays (e.g., "Barangay 1", "Barangay 175")
+                10. When you see a standalone number (especially 1-188 for Caloocan, 1-306 for Manila) in the address, it likely refers to a barangay number
+                11. District/subdivision names (like "Camarin", "Tondo", "Sampaloc") are NOT official barangay names - look for numbers nearby
+                12. If you see both a district name AND a number, prioritize the NUMBER as the barangay (e.g., "Camarin 175" = "Barangay 175")
+                13. Format numbered barangays as "Barangay [number]" (e.g., "Barangay 175", not just "175")
+                14. Examples:
+                    - "Camarin 175 Caloocan" → barangay: "Barangay 175"
+                    - "Block 3 Lot 11 Franville II Camarin 175 Caloocan" → barangay: "Barangay 175"
+                    - "Tondo 105 Manila" → barangay: "Barangay 105"
+                    - "Barangay Libis Quezon City" → barangay: "Libis"
 
                 {format_instructions}
 
