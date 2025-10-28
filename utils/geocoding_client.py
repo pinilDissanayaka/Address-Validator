@@ -59,19 +59,16 @@ class GeocodingClient:
         try:
             logger.debug(f"Geocoding address: {address[:50]}...")
             
-            # Perform geocoding with Philippines region bias
             geocode_result = self.gmaps.geocode(address, region=region)
             
             if not geocode_result or len(geocode_result) == 0:
                 logger.warning(f"No geocoding results found for address: {address}")
                 return {'error_reason': 'No geographic coordinates found for this address'}
             
-            # Get the first (best) result
             result = geocode_result[0]
             geometry = result.get('geometry', {})
             location = geometry.get('location', {})
             
-            # Check for unsupported region types
             types = result.get('types', [])
             unsupported_types = [t for t in types if t in ['political', 'sublocality', 'sublocality_level_1', 'sublocality_level_2', 'postal_code']]
             
@@ -86,7 +83,6 @@ class GeocodingClient:
                 'types': types
             }
             
-            # Check if result is too general (only political/administrative)
             if unsupported_types and len([t for t in types if t not in unsupported_types]) == 0:
                 logger.warning(f"Geocoding result has unsupported region types: {unsupported_types}")
                 geocoding_data['warning'] = f"Unsupported Region Types on Geocoding API: {', '.join(unsupported_types)}"
@@ -124,7 +120,6 @@ class GeocodingClient:
                 logger.warning(f"No reverse geocoding results found for coordinates")
                 return None
             
-            # Get the first (most specific) result
             result = reverse_result[0]
             
             return {
