@@ -21,6 +21,8 @@ class Settings:
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0"))
 
+    GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_API_KEY")
+
     PHILATLAS_BASE_URL = os.getenv("PHILATLAS_BASE_URL", "https://philatlas.ph")
     PHILATLAS_TIMEOUT = float(os.getenv("PHILATLAS_TIMEOUT", "10.0"))
 

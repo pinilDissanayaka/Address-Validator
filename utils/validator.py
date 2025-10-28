@@ -1,23 +1,30 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 import logging
-from schema import AddressValidationResponse, ParsedAddress
+from schema import AddressValidationResponse, ParsedAddress, GeocodingData
 from utils.address_parser import AddressParser
 from utils.philatlas_client import PhilAtlasClient
+from utils.geocoding_client import GeocodingClient
 from utils.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class AddressValidator:
-    def __init__(self, parser: AddressParser, philatlas_client: PhilAtlasClient):
+    def __init__(self, parser: AddressParser, philatlas_client: PhilAtlasClient, 
+                 geocoding_client: Optional[GeocodingClient] = None):
         """
         Initializes an AddressValidator instance
         :param parser: An instance of AddressParser to parse addresses
         :param philatlas_client: An instance of PhilAtlasClient to interact with PhilAtlas
+        :param geocoding_client: Optional GeocodingClient for geocoding valid addresses
         """
         self.parser = parser
         self.philatlas_client = philatlas_client
+        self.geocoding_client = geocoding_client
         logger.info("AddressValidator initialized with PhilAtlas client")
+        if self.geocoding_client:
+            logger.info("Geocoding client enabled")
+
     
     def _normalize_name(self, name: Optional[str]) -> Optional[str]:
         """
@@ -65,7 +72,7 @@ class AddressValidator:
         Main validation method:
         1. Parse the address using LLM
         2. Validate each component against PhilAtlas data
-        3. Return structured response
+        3. Return structured response with validation reasons
         """
         logger.debug(f"Starting address validation for: {address_text[:50]}...")
         
@@ -77,10 +84,41 @@ class AddressValidator:
         validated_data = self._validate_components(parsed)
         logger.debug(f"Validated components: {validated_data}")
         
-        is_valid = self._check_validity(validated_data)
+        # Check validity and collect reasons
+        is_valid, validation_reasons = self._check_validity(validated_data)
         logger.info(f"Address validation complete: isValid={is_valid}")
         
         formatted = self._format_address(validated_data)
+        
+        # Geocode the address if it's valid and geocoding client is available
+        geocoding_data = None
+        all_reasons = list(validation_reasons)  # Copy validation reasons
+        
+        if is_valid and self.geocoding_client:
+            logger.debug("Address is valid, attempting geocoding...")
+            geocode_result = self.geocoding_client.geocode_address(formatted)
+            
+            if geocode_result:
+                # Check if there's an error reason
+                if 'error_reason' in geocode_result:
+                    logger.warning(f"Geocoding failed: {geocode_result['error_reason']}")
+                    all_reasons.append(f"Geocoding failed: {geocode_result['error_reason']}")
+                else:
+                    # Check for warnings (like unsupported region types)
+                    if 'warning' in geocode_result:
+                        all_reasons.append(geocode_result['warning'])
+                    
+                    geocoding_data = GeocodingData(
+                        latitude=geocode_result.get('latitude'),
+                        longitude=geocode_result.get('longitude'),
+                        formatted_address=geocode_result.get('formatted_address'),
+                        place_id=geocode_result.get('place_id'),
+                        location_type=geocode_result.get('location_type')
+                    )
+                    logger.info(f"Geocoding successful: {geocoding_data.latitude}, {geocoding_data.longitude}")
+            else:
+                logger.warning("Geocoding failed for valid address")
+                all_reasons.append("Geocoding failed: Unable to find geographic coordinates for this address")
         
         return AddressValidationResponse(
             isValid=is_valid,
@@ -89,13 +127,16 @@ class AddressValidator:
             barangay=validated_data.get('barangay'),
             streetAddress=validated_data.get('street_address'),
             postalCode=validated_data.get('postal_code'),
-            formattedAddress=formatted
+            formattedAddress=formatted,
+            geocoding=geocoding_data,
+            reasons=all_reasons
         )
+
     
     def _validate_components(self, parsed: ParsedAddress) -> Dict[str, Optional[str]]:
         """
         Validate each component against PhilAtlas data
-        Returns a dictionary with validated/normalized component names
+        Returns a dictionary with validated/normalized component names and validation status
         """
         logger.debug("Starting component validation against PhilAtlas data")
         result = {
@@ -104,7 +145,12 @@ class AddressValidator:
             'barangay': None,
             'street_address': parsed.street_address,
             'postal_code': parsed.postal_code,
-            'barangay_validated': False
+            'province_validated': False,
+            'city_validated': False,
+            'barangay_validated': False,
+            'province_original': parsed.province,
+            'city_original': parsed.city,
+            'barangay_original': parsed.barangay
         }
         
         if parsed.province:
@@ -112,9 +158,11 @@ class AddressValidator:
             province_match = self.philatlas_client.search_province(parsed.province)
             if province_match:
                 result['province'] = self._normalize_name(province_match.get('name'))
+                result['province_validated'] = True
                 logger.info(f"Province validated: {parsed.province} -> {result['province']}")
             else:
                 result['province'] = self._normalize_name(parsed.province)
+                result['province_validated'] = False
                 logger.warning(f"Province not found in PhilAtlas: {parsed.province}")
         
         if parsed.city:
@@ -125,9 +173,11 @@ class AddressValidator:
             )
             if city_match:
                 result['city'] = self._normalize_name(city_match.get('name'))
+                result['city_validated'] = True
                 logger.info(f"City validated: {parsed.city} -> {result['city']}")
             else:
                 result['city'] = self._normalize_name(parsed.city)
+                result['city_validated'] = False
                 logger.warning(f"City not found in PhilAtlas: {parsed.city}")
         
         if parsed.barangay:
@@ -148,26 +198,58 @@ class AddressValidator:
         
         return result
     
-    def _check_validity(self, validated_data: Dict[str, Optional[str]]) -> bool:
+    def _check_validity(self, validated_data: Dict[str, Optional[str]]) -> Tuple[bool, List[str]]:
         """
-        Check if address is valid based on validation rules:
+        Check if address is valid based on validation rules.
+        Returns tuple of (is_valid, reasons)
+        
+        Validation rules:
         - Must have Province
         - Must have City/Municipality
         - Must have Barangay that is validated against PhilAtlas
         - Must have Street Address
+        - Components must belong to each other (city in province, barangay in city)
         """
+        reasons = []
         required_fields = ['province', 'city', 'barangay', 'street_address']
-        missing_fields = [field for field in required_fields if not validated_data.get(field)]
         
-        if missing_fields:
-            logger.debug(f"Address validation failed. Missing fields: {', '.join(missing_fields)}")
-            return False
+        # Check missing fields
+        for field in required_fields:
+            if not validated_data.get(field):
+                field_name = field.replace('_', ' ').title()
+                reasons.append(f"Missing required field: {field_name}")
         
-        if not validated_data.get('barangay_validated', False):
-            logger.debug(f"Address validation failed. Barangay '{validated_data.get('barangay')}' not found in PhilAtlas")
-            return False
+        # Check province validation
+        if validated_data.get('province') and not validated_data.get('province_validated'):
+            province_name = validated_data.get('province_original') or validated_data.get('province')
+            reasons.append(f"Province '{province_name}' not found in PhilAtlas database")
         
-        return True
+        # Check city validation
+        if validated_data.get('city') and not validated_data.get('city_validated'):
+            city_name = validated_data.get('city_original') or validated_data.get('city')
+            province_name = validated_data.get('province', 'specified province')
+            
+            if validated_data.get('province_validated'):
+                reasons.append(f"City '{city_name}' not found in {province_name}")
+            else:
+                reasons.append(f"City '{city_name}' not found in PhilAtlas database")
+        
+        # Check barangay validation
+        if validated_data.get('barangay') and not validated_data.get('barangay_validated'):
+            barangay_name = validated_data.get('barangay_original') or validated_data.get('barangay')
+            city_name = validated_data.get('city', 'specified city')
+            
+            if validated_data.get('city_validated'):
+                reasons.append(f"Barangay '{barangay_name}' not found in {city_name}")
+            else:
+                reasons.append(f"Barangay '{barangay_name}' cannot be validated (city not found)")
+        
+        is_valid = len(reasons) == 0
+        
+        if not is_valid:
+            logger.debug(f"Address validation failed. Reasons: {', '.join(reasons)}")
+        
+        return is_valid, reasons
     
     def _format_address(self, validated_data: Dict[str, Optional[str]]) -> str:
         """

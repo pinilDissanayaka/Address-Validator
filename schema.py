@@ -6,6 +6,15 @@ class AddressValidationRequest(BaseModel):
     address: str
 
 
+class GeocodingData(BaseModel):
+    """Geographic coordinates and location data"""
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    formatted_address: Optional[str] = None
+    place_id: Optional[str] = None
+    location_type: Optional[str] = None
+
+
 class AddressValidationResponse(BaseModel):
     isValid: bool
     province: Optional[str] = None
@@ -14,6 +23,8 @@ class AddressValidationResponse(BaseModel):
     streetAddress: Optional[str] = None
     postalCode: Optional[str] = None
     formattedAddress: str = ""
+    geocoding: Optional[GeocodingData] = None
+    reasons: List[str] = []  # Reasons why address is invalid or geocoding failed
 
 
 class ParsedAddress(BaseModel):

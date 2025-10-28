@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 import logging
 from schema import AddressValidationRequest, AddressValidationResponse
-from utils import AddressParser, PhilAtlasClient, AddressValidator
+from utils import AddressParser, PhilAtlasClient, GeocodingClient, AddressValidator
 
 logger = logging.getLogger(__name__)
 
@@ -12,11 +12,12 @@ validate_router=APIRouter(
 
 parser: AddressParser=None
 philatlas_client: PhilAtlasClient = None
+geocoding_client: GeocodingClient = None
 validator: AddressValidator = None
 
 @validate_router.on_event("startup")
 async def startup_event():
-    global parser, philatlas_client, validator
+    global parser, philatlas_client, geocoding_client, validator
     logger.info("Initializing validator components...")
     parser = AddressParser()
     
@@ -26,8 +27,18 @@ async def startup_event():
     philatlas_client = PhilAtlasClient(timeout=settings.PHILATLAS_TIMEOUT)
     logger.info("PhilAtlas client initialized")
     
-    validator = AddressValidator(parser, philatlas_client)
+    # Initialize Geocoding client
+    try:
+        logger.info("Initializing Geocoding client...")
+        geocoding_client = GeocodingClient()
+        logger.info("Geocoding client initialized")
+    except ValueError as e:
+        logger.warning(f"Geocoding client not initialized: {e}")
+        geocoding_client = None
+    
+    validator = AddressValidator(parser, philatlas_client, geocoding_client)
     logger.info("Validator components initialized successfully")
+
     
 
 @validate_router.post("/address", response_model=AddressValidationResponse)
