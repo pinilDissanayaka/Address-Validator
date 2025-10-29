@@ -1,7 +1,7 @@
 from typing import Optional
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 from schema import ParsedAddress
 from utils.config import settings
 from loguru import logger
@@ -12,20 +12,20 @@ class AddressParser:
         """
         Initializes an AddressParser instance.
 
-        :param api_key: Optional OpenAI API key. If not provided, uses the environment variable OPENAI_API_KEY.
+        :param api_key: Optional Gemini API key. If not provided, uses the environment variable GEMINI_API_KEY.
 
-        :raises ValueError: If OpenAI API key is not provided.
+        :raises ValueError: If Gemini API key is not provided.
         """
-        self.api_key = api_key or settings.OPENAI_API_KEY
+        self.api_key = api_key or settings.GEMINI_API_KEY
         if not self.api_key:
-            logger.error("OpenAI API key is missing")
-            raise ValueError("OpenAI API key is required. Set OPENAI_API_KEY environment variable.")
+            logger.error("Gemini API key is missing")
+            raise ValueError("Gemini API key is required. Set GEMINI_API_KEY environment variable.")
 
-        logger.info(f"Initializing AddressParser with model: {settings.OPENAI_MODEL}")
-        self.llm = ChatOpenAI(
-            model=settings.OPENAI_MODEL,
-            temperature=settings.OPENAI_TEMPERATURE,
-            api_key=self.api_key
+        logger.info(f"Initializing AddressParser with model: {settings.GEMINI_MODEL}")
+        self.llm = ChatGoogleGenerativeAI(
+            model=settings.GEMINI_MODEL,
+            temperature=settings.GEMINI_TEMPERATURE,
+            google_api_key=self.api_key
         )
 
         self.parser = PydanticOutputParser(pydantic_object=ParsedAddress)

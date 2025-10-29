@@ -182,7 +182,6 @@ class PhilAtlasClient:
                 logger.info(f"Found exact province match: {province['name']}")
                 return province
         
-        # Check common aliases
         aliases = {
             'ncr': 'metro manila',
             'national capital region': 'metro manila',

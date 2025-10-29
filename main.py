@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 from utils.config import settings
-from routes import validate_router
+from routes import validator_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,7 +18,7 @@ app = FastAPI(
     description=settings.API_DESCRIPTION
 )
 
-app.include_router(validate_router)
+app.include_router(validator_router)
 
 logger.info(f"FastAPI application initialized: {settings.API_TITLE} v{settings.API_VERSION}")
 

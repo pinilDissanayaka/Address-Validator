@@ -17,11 +17,11 @@ class Settings:
     HOST = os.getenv("HOST", "0.0.0.0")
     PORT = int(os.getenv("PORT", "8000"))
 
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0"))
 
-    GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_API_KEY")
+    GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_API_KEY") 
 
     PHILATLAS_BASE_URL = os.getenv("PHILATLAS_BASE_URL", "https://philatlas.ph")
     PHILATLAS_TIMEOUT = float(os.getenv("PHILATLAS_TIMEOUT", "10.0"))
@@ -51,15 +51,17 @@ class Settings:
         """
         Validates the configuration settings.
 
-        Checks if the OPENAI_API_KEY is set.
+        Checks if the GEMINI_API_KEY and GOOGLE_MAPS_API_KEY are set.
 
-        :raises ValueError: If OPENAI_API_KEY is not set.
+        :raises ValueError: If required API keys are not set.
         :return: True if the configuration is valid, False otherwise.
         """
         logger.info("Validating configuration settings...")
-        if not cls.OPENAI_API_KEY:
-            logger.error("OPENAI_API_KEY is not set")
-            raise ValueError("OPENAI_API_KEY is required. Set it in your .env file.")
+        if not cls.GEMINI_API_KEY:
+            logger.error("GEMINI_API_KEY is not set")
+            raise ValueError("GEMINI_API_KEY is required. Set it in your .env file.")
+        if not cls.GOOGLE_MAPS_API_KEY:
+            logger.warning("GOOGLE_MAPS_API_KEY is not set - geocoding features will be limited")
         logger.info("Configuration validated successfully")
         return True
 

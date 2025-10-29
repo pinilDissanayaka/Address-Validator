@@ -1,5 +1,3 @@
-from .validator import validate_router
+﻿from .validator import validator_router
 
-__all__ = [
-    'validate_router'
-]
+__all__ = ['validate_router']

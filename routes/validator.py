@@ -1,70 +1,75 @@
 from fastapi import APIRouter, HTTPException
 import logging
-from schema import AddressValidationRequest, AddressValidationResponse
-from utils import AddressParser, PhilAtlasClient, GeocodingClient, AddressValidator
+from schema import AddressValidationRequest, EnhancedAddressValidationResponse
+from utils import AddressParser, PhilAtlasClient
+from utils.validator import AddressValidator
+from utils.config import settings
 
 logger = logging.getLogger(__name__)
 
-validate_router=APIRouter(
-    prefix="/validator",
-    tags=["validator"]
+validator_router = APIRouter(
+    prefix="/api/v1",
+    tags=["Validation"]
 )
 
-parser: AddressParser=None
-philatlas_client: PhilAtlasClient = None
-geocoding_client: GeocodingClient = None
-validator: AddressValidator = None
+address_validator: AddressValidator = None
 
-@validate_router.on_event("startup")
+
+@validator_router.on_event("startup")
 async def startup_event():
-    global parser, philatlas_client, geocoding_client, validator
+    """Initialize validator components on startup."""
+    global enhanced_validator
     logger.info("Initializing validator components...")
-    parser = AddressParser()
     
-    # Initialize PhilAtlas client
-    from utils.config import settings
-    logger.info("Initializing PhilAtlas client...")
-    philatlas_client = PhilAtlasClient(timeout=settings.PHILATLAS_TIMEOUT)
-    logger.info("PhilAtlas client initialized")
-    
-    # Initialize Geocoding client
     try:
-        logger.info("Initializing Geocoding client...")
-        geocoding_client = GeocodingClient()
-        logger.info("Geocoding client initialized")
-    except ValueError as e:
-        logger.warning(f"Geocoding client not initialized: {e}")
-        geocoding_client = None
-    
-    validator = AddressValidator(parser, philatlas_client, geocoding_client)
-    logger.info("Validator components initialized successfully")
+        parser = AddressParser()
+        logger.info("Address parser initialized")
+        
+        philatlas_client = PhilAtlasClient(timeout=settings.PHILATLAS_TIMEOUT)
+        logger.info("PhilAtlas client initialized")
+        
+        gmaps_api_key = settings.GOOGLE_MAPS_API_KEY
+        if not gmaps_api_key:
+            logger.warning("Google Maps API key not found - geocoding will be limited")
+        
+        enhanced_validator = AddressValidator(
+            parser=parser,
+            philatlas_client=philatlas_client,
+            gmaps_api_key=gmaps_api_key
+        )
+        logger.info("Enhanced validator initialized successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize enhanced validator: {e}", exc_info=True)
+        raise
 
-    
 
-@validate_router.post("/address", response_model=AddressValidationResponse)
-async def validate_address(request: AddressValidationRequest):
-    """
-    Validate a Philippine address
-    
-    Accepts unstructured address text and returns structured, validated components.
-    
-    - **address**: Raw address text (e.g., "Unit 405, 23rd St., Barangay Libis, Quezon City, Metro Manila")
-    
-    Returns structured address with validation status.
-    """
+@validator_router.post(
+    "/validate-address",
+    response_model=EnhancedAddressValidationResponse,
+    summary="Comprehensive Address Validation with Database Integration",
+    description="Validate a Philippine address with comprehensive multi-layer validation."
+)
+async def validate_address_enhanced(request: AddressValidationRequest):
     try:
         if not request.address or not request.address.strip():
             logger.warning("Empty address validation attempt")
             raise HTTPException(status_code=400, detail="Address cannot be empty")
         
-        logger.info(f"Validating address: {request.address[:50]}...")
-        global validator
-        result = await validator.validate_address(request.address)
-        logger.info(f"Address validation result: isValid={result.isValid}")
+        logger.info(f"Enhanced validation request: {request.address[:50]}...")
+        
+        global enhanced_validator
+        if enhanced_validator is None:
+            logger.error("Enhanced validator not initialized")
+            raise HTTPException(status_code=503, detail="Validator service not available")
+        
+        result = await enhanced_validator.validate_address(request.address)
+        
+        logger.info(f"Validation complete: isValid={result.verdict.isValid}, confidence={result.verdict.confidence}")
         return result
     
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error validating address: {e}", exc_info=True)
+        logger.error(f"Error in enhanced address validation: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
