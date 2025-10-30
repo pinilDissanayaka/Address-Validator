@@ -36,7 +36,7 @@ class PhilAtlasClient:
     
     def _fuzzy_match(self, query: str, target: str, threshold: float = 0.75) -> float:
         """
-        Calculate the fuzzy match ratio between a query string and a target string.
+        Calculate the fuzzy match ratio between a query string and a target string using multiple algorithms.
         
         Args:
             query: str
@@ -50,7 +50,96 @@ class PhilAtlasClient:
             float
                 Fuzzy match ratio between the query and target strings.
         """
-        return SequenceMatcher(None, query.lower(), target.lower()).ratio()
+        query_normalized = self._normalize_for_matching(query)
+        target_normalized = self._normalize_for_matching(target)
+        
+        # Use SequenceMatcher as primary
+        ratio = SequenceMatcher(None, query_normalized, target_normalized).ratio()
+        
+        # Boost score for substring matches
+        if query_normalized in target_normalized or target_normalized in query_normalized:
+            ratio = max(ratio, 0.85)
+        
+        # Levenshtein-based scoring for typos
+        lev_distance = self._levenshtein_distance(query_normalized, target_normalized)
+        max_len = max(len(query_normalized), len(target_normalized))
+        if max_len > 0:
+            lev_ratio = 1.0 - (lev_distance / max_len)
+            # Take the better of the two ratios
+            ratio = max(ratio, lev_ratio)
+        
+        return ratio
+    
+    def _levenshtein_distance(self, s1: str, s2: str) -> int:
+        """
+        Calculate Levenshtein distance between two strings (edit distance).
+        This helps catch typos better than SequenceMatcher.
+        
+        Args:
+            s1: First string
+            s2: Second string
+            
+        Returns:
+            Edit distance (number of operations needed to transform s1 to s2)
+        """
+        if len(s1) < len(s2):
+            return self._levenshtein_distance(s2, s1)
+        
+        if len(s2) == 0:
+            return len(s1)
+        
+        previous_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            current_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                # Cost of insertions, deletions, or substitutions
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                current_row.append(min(insertions, deletions, substitutions))
+            previous_row = current_row
+        
+        return previous_row[-1]
+    
+    def _normalize_for_matching(self, text: str) -> str:
+        """
+        Enhanced normalization for matching with typo tolerance.
+        
+        Args:
+            text: Text to normalize
+            
+        Returns:
+            Normalized text
+        """
+        if not text:
+            return ""
+        
+        normalized = text.lower().strip()
+        
+        # Common character substitutions (typos/variations)
+        replacements = {
+            'ñ': 'n',
+            'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a',
+            'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+            'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i',
+            'ó': 'o', 'ò': 'o', 'ô': 'o', 'ö': 'o',
+            'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u',
+            # Common double letter typos
+            'aa': 'a',
+            'ee': 'e',
+            'ii': 'i',
+            'oo': 'o',
+            'uu': 'u',
+        }
+        
+        for old, new in replacements.items():
+            normalized = normalized.replace(old, new)
+        
+        # Remove punctuation and extra spaces
+        normalized = re.sub(r'[^\w\s-]', '', normalized)
+        normalized = re.sub(r'\s+', ' ', normalized)
+        
+        return normalized.strip()
     
     def _normalize_name(self, name: str) -> str:
         """
@@ -200,7 +289,7 @@ class PhilAtlasClient:
         
         for province in provinces:
             score = self._fuzzy_match(normalized_query, province['name'])
-            if score > best_score and score >= 0.75:
+            if score > best_score and score >= 0.70:  # Lowered from 0.75 for better typo tolerance
                 best_score = score
                 best_match = province
         
@@ -295,7 +384,7 @@ class PhilAtlasClient:
             
             for city in cities:
                 score = self._fuzzy_match(normalized_query, city['name'])
-                if score > best_score and score >= 0.75:
+                if score > best_score and score >= 0.70:  # Lowered from 0.75 for better typo tolerance
                     best_score = score
                     best_match = city
             
@@ -479,7 +568,7 @@ class PhilAtlasClient:
         
         for barangay in barangays:
             score = self._fuzzy_match(normalized_query, barangay['name'])
-            if score > best_score and score >= 0.75:
+            if score > best_score and score >= 0.70:  # Lowered from 0.75 for better typo tolerance
                 best_score = score
                 best_match = barangay
         

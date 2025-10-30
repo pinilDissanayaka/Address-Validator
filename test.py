@@ -186,6 +186,52 @@ def run_tests():
     logger.info(f"⏱️  Estimated time: {estimated_time:.1f} minutes")
     logger.info(f"API Endpoint: {API_URL}\n")
     
+    # Create CSV file and write header immediately
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = f"api_test_results_{timestamp}.csv"
+    
+    fieldnames = [
+        "test_id",
+        "original_address",
+        "db_status",
+        "db_failure_reason",
+        "test_type",
+        "test_address",
+        "expected_valid",
+        "response_time_ms",
+        "api_status_code",
+        "api_success",
+        "validation_id",
+        "is_valid",
+        "confidence",
+        "structure_ok",
+        "psgc_matched",
+        "geocode_matched",
+        "delivery_history_success",
+        "formatted_address",
+        "street_address",
+        "barangay",
+        "city",
+        "province",
+        "postal_code",
+        "latitude",
+        "longitude",
+        "delivery_input_address",
+        "delivery_input_status",
+        "delivery_formatted_address",
+        "delivery_formatted_status",
+        "reasons",
+        "suggestions",
+        "error_message"
+    ]
+    
+    csvfile = open(csv_filename, 'w', newline='', encoding='utf-8')
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer.writeheader()
+    csvfile.flush()  
+    
+    logger.info(f"📝 Writing results to: {csv_filename}\n")
+    
     all_results = []
     test_counter = 1
     start_time = time.time()
@@ -281,15 +327,17 @@ def run_tests():
             logger.error(f"  ✗ Error: {api_result.get('error', 'Unknown error')}")
         
         all_results.append(result_row)
+        
+        # Write this row immediately to CSV
+        writer.writerow(result_row)
+        csvfile.flush()  # Ensure row is written to disk immediately
+        
         test_counter += 1
         
         time.sleep(0.5)
     
-    logger.info("\n" + "="*70)
-    logger.info("SAVING RESULTS")
-    logger.info("="*70)
-    
-    csv_filename = save_results_to_csv(all_results)
+    # Close CSV file
+    csvfile.close()
     
     end_time = time.time()
     total_time = end_time - start_time

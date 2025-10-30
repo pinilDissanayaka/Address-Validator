@@ -3,6 +3,7 @@ import logging
 from schema import AddressValidationRequest, EnhancedAddressValidationResponse
 from utils import AddressParser, PhilAtlasClient
 from utils.validator import AddressValidator
+from utils.psgc_api_client import PSGCAPIClient
 from utils.config import settings
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,9 @@ async def startup_event():
         parser = AddressParser()
         logger.info("Address parser initialized")
         
+        psgc_client = PSGCAPIClient()
+        logger.info("PSGC API client initialized")
+        
         philatlas_client = PhilAtlasClient(timeout=settings.PHILATLAS_TIMEOUT)
         logger.info("PhilAtlas client initialized")
         
@@ -34,6 +38,7 @@ async def startup_event():
         
         enhanced_validator = AddressValidator(
             parser=parser,
+            psgc_client=psgc_client,
             philatlas_client=philatlas_client,
             gmaps_api_key=gmaps_api_key
         )

@@ -3,6 +3,7 @@ import logging
 from enum import Enum
 from schema import AddressValidationRequest, EnhancedAddressValidationResponse
 from utils import AddressParser, PhilAtlasClient
+from utils.psgc_api_client import PSGCAPIClient
 from utils.validator import AddressValidator
 from utils.validator_agent import AddressValidatorAgent
 from utils.config import settings
@@ -28,8 +29,11 @@ async def startup_event():
         parser = AddressParser()
         logger.info("Address parser initialized")
         
+        psgc_client = PSGCAPIClient(timeout=settings.PHILATLAS_TIMEOUT)
+        logger.info("PSGC API client initialized")
+        
         philatlas_client = PhilAtlasClient(timeout=settings.PHILATLAS_TIMEOUT)
-        logger.info("PhilAtlas client initialized")
+        logger.info("PhilAtlas client initialized (for postal code lookup)")
         
         gmaps_api_key = settings.GOOGLE_MAPS_API_KEY
         if not gmaps_api_key:
@@ -38,6 +42,7 @@ async def startup_event():
         
         agent_validator = AddressValidatorAgent(
             parser=parser,
+            psgc_client=psgc_client,
             philatlas_client=philatlas_client,
             gmaps_api_key=gmaps_api_key
         )

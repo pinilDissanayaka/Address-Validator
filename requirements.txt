@@ -1,0 +1,16 @@
+# Core dependencies (required)
+fastapi
+uvicorn
+pydantic
+requests
+beautifulsoup4
+python-dotenv
+supabase
+langchain-google-genai
+
+# Enhanced typo handling (optional but recommended)
+rapidfuzz>=3.0.0    # Fast fuzzy string matching
+phonetics>=1.0.0    # Phonetic matching (sound-alike names)
+
+# Note: The system will work without optional dependencies,
+# but will fall back to slower difflib-based matching
