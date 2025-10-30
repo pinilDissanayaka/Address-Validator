@@ -233,7 +233,10 @@ class PhilAtlasClient:
         
         cities = []
         
-        city_links = soup.find_all('a', href=re.compile(r'^/?[^/]+/[^/]+/[^/]+\.html'))
+        province_path = province_url.lstrip('/').rsplit('.', 1)[0] 
+        
+        city_pattern = re.compile(f'^{re.escape(province_path)}/[^/]+\\.html$')
+        city_links = soup.find_all('a', href=city_pattern)
         
         for link in city_links:
             city_name = link.get_text(strip=True)
@@ -245,7 +248,7 @@ class PhilAtlasClient:
             if not city_url.startswith('/'):
                 city_url = '/' + city_url
             
-            if city_url == province_url or city_url.count('/') < 3:
+            if city_url == province_url:
                 continue
             
             cities.append({
@@ -359,6 +362,80 @@ class PhilAtlasClient:
         
         logger.debug(f"Found {len(barangays)} barangays")
         return barangays
+    
+    def get_barangay_postal_code(self, barangay_name: str, city_name: Optional[str] = None, 
+                                  province_name: Optional[str] = None) -> Optional[str]:
+        """
+        Get postal code for a barangay from PhilAtlas.
+        
+        Args:
+            barangay_name: Name of the barangay
+            city_name: Optional city/municipality name to narrow search
+            province_name: Optional province name to narrow search
+            
+        Returns:
+            Postal code as string or None if not found
+        """
+        if not barangay_name or not city_name:
+            logger.warning("Cannot get postal code without barangay and city")
+            return None
+        
+        logger.debug(f"Getting postal code for barangay: {barangay_name} in {city_name}")
+        
+        city_data = self.search_city_municipality(city_name, province_name)
+        if not city_data:
+            logger.warning(f"City not found, cannot get postal code: {city_name}")
+            return None
+        
+        city_url = city_data.get('url', '')
+        if not city_url:
+            return None
+        
+        normalized_barangay = self._normalize_name(barangay_name)
+        barangay_slug = normalized_barangay.lower().replace(' ', '-')
+        
+        city_path = city_url.rstrip('.html')
+        barangay_url = f"{city_path}/{barangay_slug}.html"
+        
+        url = f"{self.BASE_URL}{barangay_url}"
+        logger.debug(f"Fetching postal code from: {url}")
+        
+        soup = self._fetch_page(url)
+        if not soup:
+            logger.debug(f"Failed to fetch barangay page: {url}")
+            return None
+        
+        try:
+            tables = soup.find_all('table')
+            for table in tables:
+                rows = table.find_all('tr')
+                for row in rows:
+                    cells = row.find_all(['th', 'td'])
+                    for i, cell in enumerate(cells):
+                        cell_text = cell.get_text(strip=True).lower()
+                        if 'zip' in cell_text or 'postal' in cell_text:
+                            # Next cell should contain the postal code
+                            if i + 1 < len(cells):
+                                postal_code = cells[i + 1].get_text(strip=True)
+                                if postal_code and postal_code.isdigit() and len(postal_code) == 4:
+                                    logger.info(f"Found postal code from PhilAtlas: {postal_code}")
+                                    return postal_code
+            
+            text_content = soup.get_text()
+            postal_pattern = re.compile(r'\b(\d{4})\b')
+            matches = postal_pattern.findall(text_content)
+            
+            for match in matches:
+                if 1000 <= int(match) <= 9999 and not (1900 <= int(match) <= 2100):
+                    logger.info(f"Found potential postal code from PhilAtlas: {match}")
+                    return match
+            
+            logger.debug(f"No postal code found in PhilAtlas for {barangay_name}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error extracting postal code from PhilAtlas: {e}")
+            return None
     
     def search_barangay(self, name: str, city_name: Optional[str] = None, 
                        province_name: Optional[str] = None) -> Optional[Dict[str, Any]]:

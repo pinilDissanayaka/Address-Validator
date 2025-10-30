@@ -74,7 +74,6 @@ class GoogleMapsValidator:
             _result = self.gmaps.geocode(address)
             
             if _result and len(_result) > 0:
-                # Get country from first result
                 for component in _result[0].get("address_components", []):
                     if "country" in component.get("types", []):
                         country_code = component.get("short_name", "")

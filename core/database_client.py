@@ -118,7 +118,7 @@ def get_barangays(city_name: Optional[str] = None) -> List[str]:
         return []
 
 
-def get_barangay_details(barangay_name: str) -> Dict[str, Any]:
+def get_barangay_details(barangay_name: str, city_name: Optional[str] = None) -> Dict[str, Any]:
     """Get detailed information about a barangay including postal code."""
     if not SUPABASE_CLIENT:
         return {}
@@ -126,12 +126,37 @@ def get_barangay_details(barangay_name: str) -> Dict[str, Any]:
     try:
         _barangay = barangay_name.replace("brgy ", "").replace("brgy.", "").replace("barangay ", "").strip()
         query = SUPABASE_CLIENT.table("psgc_barangay").select("*").filter("barangay", "ilike", _barangay)
+        
+        # If city is provided, narrow down the search
+        if city_name:
+            city_details = get_city_details(city_name)
+            if city_details and "city_id" in city_details:
+                query = query.eq("city_id", city_details["city_id"])
+        
         res = query.execute()
         data = res.data if hasattr(res, "data") else res
         return data[0] if len(data) > 0 else {}
     except Exception as e:
         logger.exception(f"Failed to fetch barangay details for {barangay_name}")
         return {}
+
+
+def get_postal_code_by_barangay(barangay_name: str, city_name: Optional[str] = None) -> Optional[str]:
+    """Get postal code for a specific barangay."""
+    if not SUPABASE_CLIENT:
+        return None
+    
+    try:
+        barangay_details = get_barangay_details(barangay_name, city_name)
+        if barangay_details and "postcode" in barangay_details:
+            postal_code = barangay_details.get("postcode")
+            if postal_code:
+                logger.info(f"Found postal code from database: {postal_code} for {barangay_name}")
+                return str(postal_code)
+        return None
+    except Exception as e:
+        logger.exception(f"Failed to fetch postal code for {barangay_name}")
+        return None
 
 
 def get_delivery_history(address: str, limit: int = 3) -> List[Dict[str, Any]]:

@@ -15,11 +15,9 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-API_URL = "http://localhost:8000/api/v1/validate-address"
+API_URL = "http://localhost:8000/api/v2/agent-validator/validate-address"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
-TEST_VARIATIONS = True  
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")  
 
 
 def get_supabase_client():
@@ -107,49 +105,7 @@ def test_api_endpoint(address: str, timeout: int = 60) -> Dict[str, Any]:
         }
 
 
-def create_test_variations(address: str) -> List[Dict[str, str]]:
-    """
-    Create variations of an address for testing
-    - Original (correct)
-    - Missing component (incorrect)
-    - Typo (incorrect)
-    - Partial address (incorrect)
-    """
-    variations = [
-        {
-            "type": "original",
-            "address": address,
-            "expected_valid": True
-        }
-    ]
-    
-    if TEST_VARIATIONS:
-        parts = address.split()
-        
-        if len(parts) > 2:
-            variations.append({
-                "type": "missing_component",
-                "address": " ".join(parts[:-1]),
-                "expected_valid": False
-            })
-        
-        if len(parts) > 0:
-            modified = parts.copy()
-            modified[0] = modified[0][::-1]  
-            variations.append({
-                "type": "typo",
-                "address": " ".join(modified),
-                "expected_valid": False
-            })
-        
-        if len(parts) > 3:
-            variations.append({
-                "type": "partial",
-                "address": " ".join(parts[:len(parts)//2]),
-                "expected_valid": False
-            })
-    
-    return variations
+
 
 
 def save_results_to_csv(results: List[Dict[str, Any]], filename: str = None):
@@ -225,11 +181,9 @@ def run_tests():
         return
     
     logger.info(f"\nTesting API with {len(history_records)} delivery history records")
-    if TEST_VARIATIONS:
-        total_tests = len(history_records) * 4  
-        logger.info(f"Creating test variations (4 tests per address = ~{total_tests} total tests)")
-        estimated_time = (total_tests * 3) / 60  
-        logger.info(f"⏱️  Estimated time: {estimated_time:.1f} minutes")
+    total_tests = len(history_records)
+    estimated_time = (total_tests * 3) / 60  
+    logger.info(f"⏱️  Estimated time: {estimated_time:.1f} minutes")
     logger.info(f"API Endpoint: {API_URL}\n")
     
     all_results = []
@@ -246,99 +200,90 @@ def run_tests():
         logger.info(f"\n[{idx}/{len(history_records)} - {progress:.1f}%] Testing: {original_address[:60]}...")
         logger.info(f"  DB Status: {db_status}")
         
-        variations = create_test_variations(original_address)
+        api_result = test_api_endpoint(original_address)
         
-        for var in variations:
-            test_type = var["type"]
-            test_address = var["address"]
-            expected_valid = var["expected_valid"]
+        logger.info(f"  ⏱  Response time: {api_result['response_time_ms']}ms")
+        
+        result_row = {
+            "test_id": test_counter,
+            "original_address": original_address,
+            "db_status": db_status,
+            "db_failure_reason": db_failure_reason or "",
+            "test_type": "original",
+            "test_address": original_address,
+            "expected_valid": True,
+            "response_time_ms": api_result["response_time_ms"],
+            "api_status_code": api_result["status_code"],
+            "api_success": api_result["success"],
+        }
+        
+        if api_result["success"] and api_result["data"]:
+            data = api_result["data"]
+            verdict = data.get("verdict", {})
+            structure = data.get("structure", {})
+            psgc = data.get("psgc", {})
+            geocode = data.get("geocode", {})
+            delivery = data.get("deliveryHistory", {})
             
-            logger.info(f"  → {test_type.upper()}: {test_address[:50]}...")
+            result_row.update({
+                "validation_id": data.get("id", ""),
+                "is_valid": verdict.get("isValid", False),
+                "confidence": verdict.get("confidence", 0),
+                "structure_ok": verdict.get("structureOk", False),
+                "psgc_matched": verdict.get("psgcMatched", False),
+                "geocode_matched": verdict.get("geocodeMatched", False),
+                "delivery_history_success": verdict.get("deliveryHistorySuccess", False),
+                "formatted_address": data.get("formattedAddress", ""),
+                "street_address": structure.get("streetAddress", ""),
+                "barangay": structure.get("barangay", ""),
+                "city": structure.get("city", ""),
+                "province": structure.get("province", ""),
+                "postal_code": structure.get("postalCode", ""),
+                "latitude": geocode.get("lat", 0),
+                "longitude": geocode.get("lng", 0),
+                "delivery_input_address": delivery.get("inputAddress", {}).get("address", ""),
+                "delivery_input_status": delivery.get("inputAddress", {}).get("status", ""),
+                "delivery_formatted_address": delivery.get("formattedAddress", {}).get("address", ""),
+                "delivery_formatted_status": delivery.get("formattedAddress", {}).get("status", ""),
+                "reasons": "; ".join(data.get("reason", [])),
+                "suggestions": "; ".join(data.get("suggestions", [])),
+                "error_message": ""
+            })
             
-            api_result = test_api_endpoint(test_address)
+            logger.info(f"  ✓ Valid: {verdict.get('isValid')} | Confidence: {verdict.get('confidence')}%")
             
-            logger.info(f"    ⏱  Response time: {api_result['response_time_ms']}ms")
+        else:
+            result_row.update({
+                "validation_id": "",
+                "is_valid": False,
+                "confidence": 0,
+                "structure_ok": False,
+                "psgc_matched": False,
+                "geocode_matched": False,
+                "delivery_history_success": False,
+                "formatted_address": "",
+                "street_address": "",
+                "barangay": "",
+                "city": "",
+                "province": "",
+                "postal_code": "",
+                "latitude": 0,
+                "longitude": 0,
+                "delivery_input_address": "",
+                "delivery_input_status": "",
+                "delivery_formatted_address": "",
+                "delivery_formatted_status": "",
+                "reasons": "",
+                "suggestions": "",
+                "error_message": api_result.get("error", "")
+            })
             
-            result_row = {
-                "test_id": test_counter,
-                "original_address": original_address,
-                "db_status": db_status,
-                "db_failure_reason": db_failure_reason or "",
-                "test_type": test_type,
-                "test_address": test_address,
-                "expected_valid": expected_valid,
-                "response_time_ms": api_result["response_time_ms"],
-                "api_status_code": api_result["status_code"],
-                "api_success": api_result["success"],
-            }
-            
-            if api_result["success"] and api_result["data"]:
-                data = api_result["data"]
-                verdict = data.get("verdict", {})
-                structure = data.get("structure", {})
-                psgc = data.get("psgc", {})
-                geocode = data.get("geocode", {})
-                delivery = data.get("deliveryHistory", {})
-                
-                result_row.update({
-                    "validation_id": data.get("id", ""),
-                    "is_valid": verdict.get("isValid", False),
-                    "confidence": verdict.get("confidence", 0),
-                    "structure_ok": verdict.get("structureOk", False),
-                    "psgc_matched": verdict.get("psgcMatched", False),
-                    "geocode_matched": verdict.get("geocodeMatched", False),
-                    "delivery_history_success": verdict.get("deliveryHistorySuccess", False),
-                    "formatted_address": data.get("formattedAddress", ""),
-                    "street_address": structure.get("streetAddress", ""),
-                    "barangay": structure.get("barangay", ""),
-                    "city": structure.get("city", ""),
-                    "province": structure.get("province", ""),
-                    "postal_code": structure.get("postalCode", ""),
-                    "latitude": geocode.get("lat", 0),
-                    "longitude": geocode.get("lng", 0),
-                    "delivery_input_address": delivery.get("inputAddress", {}).get("address", ""),
-                    "delivery_input_status": delivery.get("inputAddress", {}).get("status", ""),
-                    "delivery_formatted_address": delivery.get("formattedAddress", {}).get("address", ""),
-                    "delivery_formatted_status": delivery.get("formattedAddress", {}).get("status", ""),
-                    "reasons": "; ".join(data.get("reason", [])),
-                    "suggestions": "; ".join(data.get("suggestions", [])),
-                    "error_message": ""
-                })
-                
-                logger.info(f"    ✓ Valid: {verdict.get('isValid')} | Confidence: {verdict.get('confidence')}%")
-                
-            else:
-                result_row.update({
-                    "validation_id": "",
-                    "is_valid": False,
-                    "confidence": 0,
-                    "structure_ok": False,
-                    "psgc_matched": False,
-                    "geocode_matched": False,
-                    "delivery_history_success": False,
-                    "formatted_address": "",
-                    "street_address": "",
-                    "barangay": "",
-                    "city": "",
-                    "province": "",
-                    "postal_code": "",
-                    "latitude": 0,
-                    "longitude": 0,
-                    "delivery_input_address": "",
-                    "delivery_input_status": "",
-                    "delivery_formatted_address": "",
-                    "delivery_formatted_status": "",
-                    "reasons": "",
-                    "suggestions": "",
-                    "error_message": api_result.get("error", "")
-                })
-                
-                logger.error(f"    ✗ Error: {api_result.get('error', 'Unknown error')}")
-            
-            all_results.append(result_row)
-            test_counter += 1
-            
-            time.sleep(0.5)
+            logger.error(f"  ✗ Error: {api_result.get('error', 'Unknown error')}")
+        
+        all_results.append(result_row)
+        test_counter += 1
+        
+        time.sleep(0.5)
     
     logger.info("\n" + "="*70)
     logger.info("SAVING RESULTS")

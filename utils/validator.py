@@ -132,12 +132,25 @@ class AddressValidator:
                 psgc_results = self._match_psgc_database(temp_data)
                 temp_data.update(psgc_results)
                 
+                # If postal code still missing, try PhilAtlas again with updated barangay info
+                if not temp_data.get("postalCode") and temp_data.get("barangay") and temp_data.get("city"):
+                    logger.info("Postal code still missing, attempting PhilAtlas lookup with geocoded components")
+                    philatlas_postal = self.philatlas_client.get_barangay_postal_code(
+                        temp_data["barangay"],
+                        temp_data.get("city"),
+                        temp_data.get("province")
+                    )
+                    if philatlas_postal:
+                        temp_data["postalCode"] = philatlas_postal
+                        temp_data["suggestion"] = temp_data.get("suggestion", [])
+                        temp_data["suggestion"].append(f"Postal code {philatlas_postal} suggested from PhilAtlas for {temp_data['barangay']}")
+                        logger.info(f"Postal code from PhilAtlas (after geocode): {philatlas_postal}")
+                
                 if all([temp_data.get("streetAddress"), temp_data.get("barangay"), 
                         temp_data.get("city"), temp_data.get("province")]):
                     temp_data["formattedAddress"] = self._format_ph_address(temp_data)
                     temp_data["structureOk"] = True
         
-        # STEP 6: Check delivery history
         if self.db_available:
             logger.info("STEP 6: Checking delivery history")
             delivery_history = self._check_delivery_history(_incoming_address, temp_data.get("formattedAddress", ""))
@@ -154,6 +167,7 @@ class AddressValidator:
             "structureOk": False,
             "psgcMatched": False,
             "geocodeMatched": False,
+            "philatlasValidated": True, 
             "deliveryHistorySuccess": 0,
             "confidence": 0.0,
             "province": "",
@@ -200,6 +214,7 @@ class AddressValidator:
             "barangay": "",
             "streetAddress": parsed.street_address or "",
             "postalCode": parsed.postal_code or "",
+            "philatlasValidated": True,  
         }
         
         if parsed.province:
@@ -211,6 +226,7 @@ class AddressValidator:
                 result["province"] = parsed.province.title()
                 result["reason"] = result.get("reason", [])
                 result["reason"].append(f"Province '{parsed.province}' not found in PhilAtlas")
+                result["philatlasValidated"] = False
         
         if parsed.city:
             city_match = self.philatlas_client.search_city_municipality(
@@ -223,6 +239,7 @@ class AddressValidator:
                 result["city"] = parsed.city.title()
                 result["reason"] = result.get("reason", [])
                 result["reason"].append(f"City '{parsed.city}' not found in PhilAtlas")
+                result["philatlasValidated"] = False
         
         if parsed.barangay:
             barangay_match = self.philatlas_client.search_barangay(
@@ -235,6 +252,7 @@ class AddressValidator:
                 result["barangay"] = parsed.barangay.title()
                 result["reason"] = result.get("reason", [])
                 result["reason"].append(f"Barangay '{parsed.barangay}' not found in PhilAtlas")
+                result["philatlasValidated"] = False
         
         return result
     
@@ -256,19 +274,43 @@ class AddressValidator:
                 logger.debug(f"PSGC city matched: {city_details}")
         
         if temp_data.get("barangay"):
-            barangay_details = db.get_barangay_details(temp_data["barangay"])
+            barangay_details = db.get_barangay_details(temp_data["barangay"], temp_data.get("city"))
             if barangay_details:
                 result["barangay_id"] = str(barangay_details.get("barangay_id", ""))
                 if not temp_data.get("postalCode"):
-                    result["postalCode"] = str(barangay_details.get("postcode", ""))
+                    postal_from_db = barangay_details.get("postcode")
+                    if postal_from_db:
+                        result["postalCode"] = str(postal_from_db)
+                        logger.info(f"Postal code from database: {postal_from_db}")
                 logger.debug(f"PSGC barangay matched: {barangay_details}")
+            
+            # If postal code still not found, try to get it from PhilAtlas
+            if not result.get("postalCode") and temp_data.get("city"):
+                logger.info(f"Postal code not found in database, attempting to get from PhilAtlas for barangay: {temp_data['barangay']}")
+                philatlas_postal = self.philatlas_client.get_barangay_postal_code(
+                    temp_data["barangay"],
+                    temp_data.get("city"),
+                    temp_data.get("province")
+                )
+                if philatlas_postal:
+                    result["postalCode"] = philatlas_postal
+                    result["suggestion"] = result.get("suggestion", [])
+                    result["suggestion"].append(f"Postal code {philatlas_postal} suggested from PhilAtlas for barangay {temp_data['barangay']}")
+                    logger.info(f"Postal code from PhilAtlas: {philatlas_postal}")
         
-        result["psgcMatched"] = all([
+        psgc_codes_found = all([
             result.get("region_id"),
             result.get("province_id"),
             result.get("city_id"),
             result.get("barangay_id")
         ])
+        
+        philatlas_validated = temp_data.get("philatlasValidated", True)
+        
+        result["psgcMatched"] = psgc_codes_found and philatlas_validated
+        
+        if psgc_codes_found and not philatlas_validated:
+            logger.warning("PSGC codes found but PhilAtlas validation failed - marking psgcMatched as False")
         
         return result
     
@@ -392,10 +434,14 @@ class AddressValidator:
         structure_ok = temp_data.get("structureOk", False)
         psgc_matched = temp_data.get("psgcMatched", False)
         geocode_matched = temp_data.get("geocodeMatched", False)
+        philatlas_validated = temp_data.get("philatlasValidated", True)
         delivery_success = temp_data.get("deliveryHistorySuccess", 0)
         
         reasons = temp_data.get("reason", [])
         is_non_ph_rejection = any("only validate Philippine addresses" in reason for reason in reasons)
+        
+        # Check if there are PhilAtlas validation errors
+        has_philatlas_errors = any("not found in PhilAtlas" in reason for reason in reasons)
         
         if structure_ok and psgc_matched and geocode_matched and delivery_success == 1:
             confidence = 99
@@ -407,12 +453,20 @@ class AddressValidator:
             confidence += 20 if structure_ok else -10
             confidence += 10 if psgc_matched else -5
             confidence += 4 if geocode_matched else -2
+            
+            # Penalize if PhilAtlas validation failed
+            if has_philatlas_errors:
+                confidence -= 20
+            
             confidence = max(0, min(100, confidence)) 
         
         if is_non_ph_rejection:
             is_valid = False
         else:
-            is_valid = structure_ok or psgc_matched or geocode_matched or delivery_success == 1
+            if has_philatlas_errors and delivery_success != 1:
+                is_valid = False
+            else:
+                is_valid = structure_ok or psgc_matched or geocode_matched or delivery_success == 1
         
         return VerdictResponse(
             isValid=is_valid,
