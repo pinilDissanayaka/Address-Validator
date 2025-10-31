@@ -61,6 +61,11 @@ class ValidationState(TypedDict):
     place_id: str
     geocode_formatted_address: str
     
+    # Intermediate geocode results for agentic refinement
+    geocode_city: str
+    geocode_barangay: str
+    geocode_postal: str
+    
     region_id: str
     province_id: str
     city_id: str
@@ -101,21 +106,28 @@ class AddressValidatorAgent:
         logger.info(f"AddressValidatorAgent initialized (PSGC API: True, DB: {self.db_available}, GMaps: {self.gmaps_validator is not None}, PhilAtlas: {philatlas_client is not None})")
     
     def _build_graph(self) -> StateGraph:
-        """Build the LangGraph validation workflow."""
+        """Build the enhanced LangGraph validation workflow with intelligent routing."""
         workflow = StateGraph(ValidationState)
         
+        # Add validation nodes
         workflow.add_node("initialize", self._initialize_state)
         workflow.add_node("validate_country", self._validate_country)
         workflow.add_node("parse_address", self._parse_address)
+        workflow.add_node("apply_typo_corrections", self._apply_typo_corrections)
         workflow.add_node("validate_psgc_api", self._validate_psgc_api)
         workflow.add_node("match_psgc", self._match_psgc)
         workflow.add_node("geocode", self._geocode_address)
+        workflow.add_node("refine_with_geocode", self._refine_with_geocode)
         workflow.add_node("check_delivery", self._check_delivery_history)
+        workflow.add_node("retry_with_suggestions", self._retry_with_suggestions)
         workflow.add_node("calculate_verdict", self._calculate_verdict)
         
         workflow.set_entry_point("initialize")
         
+        # Linear flow with conditional branching
         workflow.add_edge("initialize", "validate_country")
+        
+        # After country validation, decide next step
         workflow.add_conditional_edges(
             "validate_country",
             self._route_after_country_check,
@@ -125,11 +137,44 @@ class AddressValidatorAgent:
             }
         )
         
-        workflow.add_edge("parse_address", "validate_psgc_api")
+        # After parsing, apply typo corrections
+        workflow.add_edge("parse_address", "apply_typo_corrections")
+        workflow.add_edge("apply_typo_corrections", "validate_psgc_api")
         workflow.add_edge("validate_psgc_api", "match_psgc")
-        workflow.add_edge("match_psgc", "geocode")
-        workflow.add_edge("geocode", "check_delivery")
-        workflow.add_edge("check_delivery", "calculate_verdict")
+        
+        # After PSGC matching, decide if we need geocoding help
+        workflow.add_conditional_edges(
+            "match_psgc",
+            self._route_after_psgc,
+            {
+                "geocode": "geocode",
+                "skip_geocode": "check_delivery"
+            }
+        )
+        
+        # After geocoding, decide if we need to refine
+        workflow.add_conditional_edges(
+            "geocode",
+            self._route_after_geocode,
+            {
+                "refine": "refine_with_geocode",
+                "continue": "check_delivery"
+            }
+        )
+        
+        workflow.add_edge("refine_with_geocode", "check_delivery")
+        
+        # After delivery check, decide if we need to retry
+        workflow.add_conditional_edges(
+            "check_delivery",
+            self._route_after_delivery,
+            {
+                "retry": "retry_with_suggestions",
+                "finish": "calculate_verdict"
+            }
+        )
+        
+        workflow.add_edge("retry_with_suggestions", "calculate_verdict")
         workflow.add_edge("calculate_verdict", END)
         
         return workflow.compile()
@@ -156,10 +201,16 @@ class AddressValidatorAgent:
             "barangay": "",
             "street_address": "",
             "postal_code": "",
+            "province_code": "",
+            "city_code": "",
+            "barangay_code": "",
             "latitude": 0.0,
             "longitude": 0.0,
             "place_id": "",
             "geocode_formatted_address": "",
+            "geocode_city": "",
+            "geocode_barangay": "",
+            "geocode_postal": "",
             "region_id": "",
             "province_id": "",
             "city_id": "",
@@ -247,6 +298,43 @@ class AddressValidatorAgent:
         state["barangay"] = parsed.barangay or ""
         state["street_address"] = parsed.street_address or ""
         state["postal_code"] = parsed.postal_code or ""
+        
+        return state
+    
+    def _apply_typo_corrections(self, state: ValidationState) -> ValidationState:
+        """Apply intelligent typo corrections using smart handler."""
+        logger.info("STEP 3.5: Applying typo corrections")
+        state["current_step"] = "apply_typo_corrections"
+        
+        try:
+            from utils.smart_typo_handler import SmartTypoHandler
+            from schema import ParsedAddress
+            
+            typo_handler = SmartTypoHandler(min_score=80, phonetic_enabled=True)
+            
+            # Create a parsed address object
+            parsed_address = ParsedAddress(
+                province=state["province"],
+                city=state["city"],
+                barangay=state["barangay"],
+                street_address=state["street_address"],
+                postal_code=state["postal_code"]
+            )
+            
+            # Apply corrections
+            corrected = typo_handler.apply_corrections(parsed_address, self.psgc_client)
+            
+            # Update state with corrected values
+            state["province"] = corrected.province or state["province"]
+            state["city"] = corrected.city or state["city"]
+            state["barangay"] = corrected.barangay or state["barangay"]
+            
+            logger.debug(f"After typo corrections: province={state['province']}, city={state['city']}, barangay={state['barangay']}")
+            
+        except ImportError:
+            logger.debug("Smart typo handler not available, skipping")
+        except Exception as e:
+            logger.warning(f"Typo correction failed: {e}")
         
         return state
     
@@ -522,6 +610,11 @@ class AddressValidatorAgent:
             state["geocode_formatted_address"] = geocode_result.get("formattedAddress", "")
             state["geocode_matched"] = True
             
+            # Store geocode results for potential refinement (agentic decision-making)
+            state["geocode_city"] = geocode_result.get("city", "")
+            state["geocode_barangay"] = geocode_result.get("barangay", "")
+            state["geocode_postal"] = geocode_result.get("postalCode", "")
+            
             if not state["city"] and geocode_result.get("city"):
                 state["city"] = geocode_result.get("city")
                 logger.info(f"City filled from geocode: {state['city']}")
@@ -614,6 +707,115 @@ class AddressValidatorAgent:
         
         return state
     
+    def _refine_with_geocode(self, state: ValidationState) -> ValidationState:
+        """
+        Refine address components using geocoding results.
+        This is an agentic self-correction step.
+        """
+        logger.info("STEP 6.5: Refining with geocode results")
+        state["current_step"] = "refine_with_geocode"
+        
+        try:
+            # If geocoding provided components we're missing, re-validate with PSGC
+            if not state["city"] and state.get("geocode_city"):
+                state["city"] = state["geocode_city"]
+                logger.info(f"Agent refinement: City filled from geocode: {state['city']}")
+                
+                # Re-validate city with PSGC
+                city_match = self.psgc_client.search_city_municipality(state["city"])
+                if city_match:
+                    state["city"] = city_match.get('name', '').title()
+                    state["city_code"] = city_match.get('code', '')
+                    logger.info(f"Agent refinement: City re-validated: {state['city']}")
+            
+            if not state["barangay"] and state.get("geocode_barangay"):
+                state["barangay"] = state["geocode_barangay"]
+                logger.info(f"Agent refinement: Barangay filled from geocode: {state['barangay']}")
+                
+                # Re-validate barangay with PSGC if we have city code
+                if state.get("city_code"):
+                    barangay_match = self.psgc_client.search_barangay(
+                        state["barangay"],
+                        state["city_code"]
+                    )
+                    if barangay_match:
+                        state["barangay"] = barangay_match.get('name', '').title()
+                        state["barangay_code"] = barangay_match.get('code', '')
+                        logger.info(f"Agent refinement: Barangay re-validated: {state['barangay']}")
+            
+            if not state["postal_code"] and state.get("geocode_postal"):
+                state["postal_code"] = state["geocode_postal"]
+                logger.info(f"Agent refinement: Postal code filled from geocode: {state['postal_code']}")
+            
+            # Update formatted address
+            if all([state["street_address"], state["barangay"], state["city"], state["province"]]):
+                state["formatted_address"] = self._format_ph_address(state)
+                state["structure_ok"] = True
+                logger.info("Agent refinement: Structure now complete!")
+        
+        except Exception as e:
+            logger.warning(f"Refinement error: {e}")
+        
+        return state
+    
+    def _retry_with_suggestions(self, state: ValidationState) -> ValidationState:
+        """
+        Retry validation using agent-generated suggestions.
+        This is an agentic error recovery step.
+        """
+        logger.info("STEP 7.5: Retrying with agent suggestions")
+        state["current_step"] = "retry_with_suggestions_attempted"
+        
+        try:
+            # Analyze reasons and generate recovery actions
+            reasons = state["reasons"]
+            
+            # If barangay not found, try without barangay (city-level validation)
+            if any("Barangay" in reason and "not found" in reason for reason in reasons):
+                logger.info("Agent recovery: Attempting city-level validation without barangay")
+                
+                # Try to match city and province only
+                if state["city"] and state["province"]:
+                    city_match = self.psgc_client.search_city_municipality(state["city"])
+                    if city_match:
+                        state["city"] = city_match.get('name', '').title()
+                        state["city_code"] = city_match.get('code', '')
+                        state["city_id"] = city_match.get('code', '')
+                        
+                        # Mark as partially validated
+                        state["suggestions"].append(
+                            f"Validated at city level: {state['city']}, {state['province']}. " 
+                            f"Barangay '{state['barangay']}' could not be verified."
+                        )
+                        state["confidence"] = max(state["confidence"], 40)
+            
+            # If province not found, try variations
+            if any("Province" in reason and "not found" in reason for reason in reasons):
+                logger.info("Agent recovery: Trying province variations")
+                
+                # Common variations
+                province_variations = [
+                    state["province"],
+                    f"Province of {state['province']}",
+                    state["province"].replace(" Province", "")
+                ]
+                
+                for variation in province_variations:
+                    province_match = self.psgc_client.search_province(variation)
+                    if province_match:
+                        state["province"] = province_match.get('name', '').title()
+                        state["province_code"] = province_match.get('code', '')
+                        state["suggestions"].append(
+                            f"Province name corrected to: {state['province']}"
+                        )
+                        logger.info(f"Agent recovery: Province found with variation: {state['province']}")
+                        break
+        
+        except Exception as e:
+            logger.warning(f"Retry failed: {e}")
+        
+        return state
+    
     def _calculate_verdict(self, state: ValidationState) -> ValidationState:
         """Calculate final validation verdict and confidence score."""
         logger.info("STEP 8: Calculating verdict and confidence")
@@ -659,6 +861,75 @@ class AddressValidatorAgent:
             return "parse"
         else:
             return "end"
+    
+    def _route_after_psgc(self, state: ValidationState) -> Literal["geocode", "skip_geocode"]:
+        """
+        Decide if geocoding is needed based on PSGC matching results.
+        Skip geocoding if we have complete and confident data.
+        """
+        # If we have all components and PSGC matched, geocoding is optional
+        has_all_components = all([
+            state["province"],
+            state["city"],
+            state["barangay"],
+            state["postal_code"]
+        ])
+        
+        if has_all_components and state["psgc_matched"]:
+            logger.info("Decision: Skipping geocoding (complete PSGC match)")
+            return "skip_geocode"
+        
+        # Otherwise, geocoding can help fill gaps or validate
+        logger.info("Decision: Performing geocoding (incomplete data or no PSGC match)")
+        return "geocode"
+    
+    def _route_after_geocode(self, state: ValidationState) -> Literal["refine", "continue"]:
+        """
+        Decide if we need to refine data with geocoding results.
+        Refine if geocoding filled in missing components.
+        """
+        # Check if geocoding provided new information
+        geocode_provided_data = state["geocode_matched"] and (
+            state["latitude"] != 0.0 or 
+            state["longitude"] != 0.0
+        )
+        
+        # Check if we're missing key components that geocoding might have filled
+        missing_components = not all([state["province"], state["city"], state["barangay"]])
+        
+        if geocode_provided_data and missing_components:
+            logger.info("Decision: Refining with geocode data (missing components)")
+            return "refine"
+        
+        logger.info("Decision: Continuing (no refinement needed)")
+        return "continue"
+    
+    def _route_after_delivery(self, state: ValidationState) -> Literal["retry", "finish"]:
+        """
+        Decide if we should retry validation with suggestions.
+        Retry if we have low confidence and suggestions available.
+        """
+        # Check if we have low confidence and no positive signals
+        low_confidence = state["confidence"] < 50
+        no_positive_signals = (
+            not state["structure_ok"] and
+            not state["psgc_matched"] and
+            not state["geocode_matched"] and
+            state["delivery_history_success"] <= 0
+        )
+        
+        # Check if we have actionable suggestions
+        has_suggestions = len(state["suggestions"]) > 0
+        
+        # Only retry once (check if we're already in retry)
+        already_retried = "retry_attempted" in state.get("current_step", "")
+        
+        if low_confidence and no_positive_signals and has_suggestions and not already_retried:
+            logger.info("Decision: Retrying with suggestions (low confidence)")
+            return "retry"
+        
+        logger.info("Decision: Finishing validation")
+        return "finish"
     
     
     def _apply_aliases(self, parsed):

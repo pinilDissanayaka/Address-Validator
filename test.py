@@ -175,7 +175,7 @@ def run_tests():
         logger.error("Cannot proceed without database connection")
         return
     
-    history_records = fetch_delivery_history(client, limit=None)  
+    history_records = fetch_delivery_history(client, limit=5)  
     if not history_records:
         logger.error("No delivery history records found")
         return
