@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-API_URL = "http://localhost:8000/api/v2/agent-validator/validate-address"
+API_URL = "http://localhost:8000/api/v2/agent-validator/validate-address-llm"
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")  
 
@@ -175,7 +175,7 @@ def run_tests():
         logger.error("Cannot proceed without database connection")
         return
     
-    history_records = fetch_delivery_history(client, limit=5)  
+    history_records = fetch_delivery_history(client, limit=10)  
     if not history_records:
         logger.error("No delivery history records found")
         return

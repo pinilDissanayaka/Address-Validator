@@ -51,6 +51,7 @@ class ValidationState(TypedDict):
     barangay: str
     street_address: str
     postal_code: str
+    original_city: str  # Store original parsed city name for formatted address
     
     province_code: str
     city_code: str
@@ -201,6 +202,7 @@ class AddressValidatorAgent:
             "barangay": "",
             "street_address": "",
             "postal_code": "",
+            "original_city": "",
             "province_code": "",
             "city_code": "",
             "barangay_code": "",
@@ -299,18 +301,23 @@ class AddressValidatorAgent:
         state["street_address"] = parsed.street_address or ""
         state["postal_code"] = parsed.postal_code or ""
         
+        # Store original city name for formatted address (before validation shortens it)
+        state["original_city"] = parsed.city or ""
+        
         return state
     
     def _apply_typo_corrections(self, state: ValidationState) -> ValidationState:
-        """Apply intelligent typo corrections using smart handler."""
-        logger.info("STEP 3.5: Applying typo corrections")
+        """Apply intelligent typo corrections using smart handler with agent reasoning."""
+        logger.info("STEP 3.5: Agent reasoning for typo corrections")
         state["current_step"] = "apply_typo_corrections"
         
         try:
             from utils.smart_typo_handler import SmartTypoHandler
             from schema import ParsedAddress
             
-            typo_handler = SmartTypoHandler(min_score=80, phonetic_enabled=True)
+            # Use very high threshold for fuzzy matching to avoid false matches
+            # Agent should prefer exact matches or no match over incorrect fuzzy matches
+            typo_handler = SmartTypoHandler(min_score=95, phonetic_enabled=False)
             
             # Create a parsed address object
             parsed_address = ParsedAddress(
@@ -322,15 +329,97 @@ class AddressValidatorAgent:
             )
             
             # Apply corrections
-            corrected = typo_handler.apply_corrections(parsed_address, self.psgc_client)
+            corrected, typo_suggestions = typo_handler.apply_corrections(parsed_address, self.psgc_client)
             
-            # Update state with corrected values
-            state["province"] = corrected.province or state["province"]
-            state["city"] = corrected.city or state["city"]
-            state["barangay"] = corrected.barangay or state["barangay"]
+            # Agent reasoning: Validate that fuzzy matches make geographic sense
+            # Don't blindly accept corrections - verify city belongs to province
+            original_province = state["province"]
+            original_city = state["city"]
+            
+            # Update province first
+            if corrected.province:
+                state["province"] = corrected.province
+            
+            # For city corrections, verify it belongs to the province
+            if corrected.city and corrected.city != original_city:
+                # Try to get province code and verify city belongs to it
+                try:
+                    if self.philatlas_client:
+                        philatlas_result = self.philatlas_client.search_city_municipality(
+                            corrected.city,
+                            state["province"]
+                        )
+                        if philatlas_result:
+                            state["city"] = corrected.city
+                            logger.info(f"Agent validated city correction: {original_city} -> {corrected.city} (confirmed in {state['province']})")
+                        else:
+                            logger.warning(f"Agent rejected city correction: {corrected.city} not found in province {state['province']}")
+                            # Keep original city
+                    else:
+                        # No PhilAtlas available, accept the correction
+                        state["city"] = corrected.city
+                except Exception as e:
+                    logger.warning(f"Could not validate city correction: {e}, keeping original")
+            elif corrected.city:
+                state["city"] = corrected.city
+            
+            # For barangay corrections, verify it belongs to the city
+            original_barangay = state["barangay"]
+            if corrected.barangay and corrected.barangay != original_barangay:
+                try:
+                    if self.philatlas_client:
+                        philatlas_result = self.philatlas_client.search_barangay(
+                            corrected.barangay,
+                            state["city"],
+                            state["province"]
+                        )
+                        if philatlas_result:
+                            state["barangay"] = corrected.barangay
+                            logger.info(f"Agent validated barangay correction: {original_barangay} -> {corrected.barangay} (confirmed in {state['city']})")
+                        else:
+                            logger.warning(f"Agent rejected barangay correction: {corrected.barangay} not found in city {state['city']}")
+                            # Keep original barangay
+                    else:
+                        # No PhilAtlas available, accept the correction
+                        state["barangay"] = corrected.barangay
+                except Exception as e:
+                    logger.warning(f"Could not validate barangay correction: {e}, keeping original")
+            elif corrected.barangay:
+                state["barangay"] = corrected.barangay
+            
+            if typo_suggestions:
+                state["suggestions"].extend(typo_suggestions)
             
             logger.debug(f"After typo corrections: province={state['province']}, city={state['city']}, barangay={state['barangay']}")
             
+            street_address = state["street_address"]
+            barangay = state["barangay"]
+            
+            if street_address and barangay:
+                street_words = street_address.strip().split()
+                barangay_words = barangay.replace("-", " ").split()
+                
+                cleaned_street_words = []
+                for word in street_words:
+                    word_lower = word.lower()
+                    barangay_words_lower = [w.lower() for w in barangay_words]
+                    
+                    if word_lower not in barangay_words_lower:
+                        cleaned_street_words.append(word)
+                    else:
+                        remaining_words = street_words[street_words.index(word):]
+                        remaining_lower = [w.lower() for w in remaining_words]
+                        
+                        if all(w in barangay_words_lower for w in remaining_lower):
+                            break
+                        else:
+                            cleaned_street_words.append(word)
+                
+                cleaned_street = " ".join(cleaned_street_words).strip()
+                if cleaned_street != street_address:
+                    logger.info(f"Removed duplicate words from street address: '{street_address}' -> '{cleaned_street}'")
+                    state["street_address"] = cleaned_street
+        
         except ImportError:
             logger.debug("Smart typo handler not available, skipping")
         except Exception as e:
@@ -339,8 +428,8 @@ class AddressValidatorAgent:
         return state
     
     def _validate_psgc_api(self, state: ValidationState) -> ValidationState:
-        """Validate address components against PSGC API with PhilAtlas fallback."""
-        logger.info("STEP 4: Validating against PSGC API (with PhilAtlas fallback)")
+        """Validate address components against PhilAtlas primary, PSGC fallback."""
+        logger.info("STEP 4: Validating against PhilAtlas (with PSGC fallback)")
         state["current_step"] = "validate_psgc_api"
         
         psgc_api_valid = True
@@ -349,61 +438,45 @@ class AddressValidatorAgent:
         province_code = None
         city_code = None
         
-        # Province validation - PSGC primary, PhilAtlas fallback
+        # Province validation - PhilAtlas primary, PSGC fallback
         if state["province"]:
-            province_match = self.psgc_client.search_province(state["province"])
-            if province_match:
-                state["province"] = province_match.get('name', '').title()
-                province_code = province_match.get('code')
-                state["province_code"] = province_code
-                logger.info(f"✓ Province validated via PSGC API: {state['province']} ({province_code})")
-            elif self.philatlas_client:
-                # Try PhilAtlas fallback
-                logger.info(f"Province '{state['province']}' not in PSGC, trying PhilAtlas...")
+            province_match_philatlas = None
+            if self.philatlas_client:
                 philatlas_provinces = self.philatlas_client.get_provinces()
-                philatlas_match = next(
+                province_match_philatlas = next(
                     (p for p in philatlas_provinces if p['name'].lower() == state["province"].lower() or 
                      self.philatlas_client._normalize_name(p['name']) == self.philatlas_client._normalize_name(state["province"])),
                     None
                 )
-                if philatlas_match:
-                    state["province"] = philatlas_match['name'].title()
-                    philatlas_used = True
-                    logger.info(f"✓ Province validated via PhilAtlas: {state['province']}")
-                    new_reasons.append(f"Province verified via PhilAtlas (not found in PSGC)")
+            
+            if province_match_philatlas:
+                state["province"] = province_match_philatlas['name'].title().strip()
+                philatlas_used = True
+                logger.info(f"✓ Province validated via PhilAtlas: {state['province']}")
+                # Get PSGC code for internal use
+                province_match = self.psgc_client.search_province(state["province"])
+                if province_match:
+                    province_code = province_match.get('code')
+                    state["province_code"] = province_code
+            else:
+                # Fallback to PSGC
+                province_match = self.psgc_client.search_province(state["province"])
+                if province_match:
+                    state["province"] = province_match.get('name', '').title().strip()
+                    province_code = province_match.get('code')
+                    state["province_code"] = province_code
+                    logger.info(f"✓ Province validated via PSGC: {state['province']} ({province_code})")
                 else:
-                    reason = f"Province '{state['province']}' not found in PSGC API or PhilAtlas"
+                    reason = f"Province '{state['province']}' not found in database"
                     if reason not in state["reasons"]:
                         new_reasons.append(reason)
-                    state["province"] = state["province"].title()
+                    state["province"] = state["province"].title().strip()
                     psgc_api_valid = False
-            else:
-                reason = f"Province '{state['province']}' not found in PSGC API"
-                if reason not in state["reasons"]:
-                    new_reasons.append(reason)
-                state["province"] = state["province"].title()
-                psgc_api_valid = False
         
-        # City validation - PSGC primary, PhilAtlas fallback
+        # City validation - PhilAtlas primary, PSGC fallback
         if state["city"]:
-            city_match = self.psgc_client.search_city_municipality(
-                state["city"], province_code
-            )
-            if city_match:
-                state["city"] = city_match.get('name', '').title()
-                city_code = city_match.get('code')
-                state["city_code"] = city_code
-                
-                # Get postal code from PSGC API if available
-                if not state.get("postal_code") and city_match.get('zip_code'):
-                    state["postal_code"] = city_match.get('zip_code')
-                    logger.info(f"Postal code from PSGC API: {state['postal_code']}")
-                
-                logger.info(f"✓ City validated via PSGC API: {state['city']} ({city_code})")
-            elif self.philatlas_client:
-                # Try PhilAtlas fallback
-                logger.info(f"City '{state['city']}' not in PSGC, trying PhilAtlas...")
-                
+            city_match_philatlas = None
+            if self.philatlas_client:
                 # Get province URL from PhilAtlas for province-specific city search
                 province_url = None
                 if state["province"]:
@@ -418,99 +491,109 @@ class AddressValidatorAgent:
                 
                 # Get cities for the province
                 philatlas_cities = self.philatlas_client.get_cities_municipalities(province_url) if province_url else []
-                philatlas_match = next(
+                city_match_philatlas = next(
                     (c for c in philatlas_cities if c['name'].lower() == state["city"].lower() or
                      self.philatlas_client._normalize_name(c['name']) == self.philatlas_client._normalize_name(state["city"])),
                     None
                 )
-                if philatlas_match:
-                    state["city"] = philatlas_match['name'].title()
-                    philatlas_used = True
-                    logger.info(f"✓ City validated via PhilAtlas: {state['city']}")
-                    new_reasons.append(f"City verified via PhilAtlas (not found in PSGC)")
+            
+            if city_match_philatlas:
+                state["city"] = city_match_philatlas['name'].title().strip()
+                philatlas_used = True
+                logger.info(f"✓ City validated via PhilAtlas: {state['city']}")
+                # Get PSGC code and postal code for internal use
+                city_match = self.psgc_client.search_city_municipality(state["city"], province_code)
+                if city_match:
+                    city_code = city_match.get('code')
+                    state["city_code"] = city_code
+                    if not state.get("postal_code") and city_match.get('zip_code'):
+                        state["postal_code"] = city_match.get('zip_code')
+                        logger.info(f"Postal code from internal database: {state['postal_code']}")
+            else:
+                # Fallback to PSGC
+                city_match = self.psgc_client.search_city_municipality(state["city"], province_code)
+                if city_match:
+                    state["city"] = city_match.get('name', '').title().strip()
+                    city_code = city_match.get('code')
+                    state["city_code"] = city_code
+                    
+                    if not state.get("postal_code") and city_match.get('zip_code'):
+                        state["postal_code"] = city_match.get('zip_code')
+                        logger.info(f"Postal code from internal database: {state['postal_code']}")
+                    
+                    logger.info(f"✓ City validated via PSGC: {state['city']} ({city_code})")
                 else:
-                    reason = f"City '{state['city']}' not found in PSGC API or PhilAtlas"
+                    reason = f"City '{state['city']}' not found in database"
                     if reason not in state["reasons"]:
                         new_reasons.append(reason)
-                    state["city"] = state["city"].title()
+                    state["city"] = state["city"].title().strip()
                     psgc_api_valid = False
-            else:
-                reason = f"City '{state['city']}' not found in PSGC API"
-                if reason not in state["reasons"]:
-                    new_reasons.append(reason)
-                state["city"] = state["city"].title()
-                psgc_api_valid = False
         
-        # Barangay validation - PSGC primary, PhilAtlas fallback
+        # Barangay validation - PhilAtlas primary, PSGC fallback
         if state["barangay"]:
-            barangay_match = self.psgc_client.search_barangay(
-                state["barangay"], city_code
-            )
-            if barangay_match:
-                state["barangay"] = barangay_match.get('name', '').title()
-                state["barangay_code"] = barangay_match.get('code')
-                logger.info(f"✓ Barangay validated via PSGC API: {state['barangay']} ({state['barangay_code']})")
-            elif self.philatlas_client and state["city"]:
-                # Try PhilAtlas fallback
-                logger.info(f"Barangay '{state['barangay']}' not in PSGC, trying PhilAtlas...")
-                
+            barangay_match_philatlas = None
+            if self.philatlas_client and state["city"]:
                 # Get city URL from PhilAtlas for city-specific barangay search
                 city_url = None
-                if state["city"]:
-                    # Get province URL first
-                    province_url = None
-                    if state["province"]:
-                        philatlas_provinces = self.philatlas_client.get_provinces()
-                        province_match = next(
-                            (p for p in philatlas_provinces if p['name'].lower() == state["province"].lower() or 
-                             self.philatlas_client._normalize_name(p['name']) == self.philatlas_client._normalize_name(state["province"])),
-                            None
-                        )
-                        if province_match:
-                            province_url = province_match.get('url')
-                    
-                    # Get city URL
-                    philatlas_cities = self.philatlas_client.get_cities_municipalities(province_url) if province_url else []
-                    city_match = next(
-                        (c for c in philatlas_cities if c['name'].lower() == state["city"].lower() or
-                         self.philatlas_client._normalize_name(c['name']) == self.philatlas_client._normalize_name(state["city"])),
+                # Get province URL first
+                province_url = None
+                if state["province"]:
+                    philatlas_provinces = self.philatlas_client.get_provinces()
+                    province_match = next(
+                        (p for p in philatlas_provinces if p['name'].lower() == state["province"].lower() or 
+                         self.philatlas_client._normalize_name(p['name']) == self.philatlas_client._normalize_name(state["province"])),
                         None
                     )
-                    if city_match:
-                        city_url = city_match.get('url')
+                    if province_match:
+                        province_url = province_match.get('url')
+                
+                # Get city URL
+                philatlas_cities = self.philatlas_client.get_cities_municipalities(province_url) if province_url else []
+                city_match = next(
+                    (c for c in philatlas_cities if c['name'].lower() == state["city"].lower() or
+                     self.philatlas_client._normalize_name(c['name']) == self.philatlas_client._normalize_name(state["city"])),
+                    None
+                )
+                if city_match:
+                    city_url = city_match.get('url')
                 
                 # Get barangays for the city
                 philatlas_barangays = self.philatlas_client.get_barangays(city_url) if city_url else []
-                philatlas_match = next(
+                barangay_match_philatlas = next(
                     (b for b in philatlas_barangays if b['name'].lower() == state["barangay"].lower() or
                      self.philatlas_client._normalize_name(b['name']) == self.philatlas_client._normalize_name(state["barangay"])),
                     None
                 )
-                if philatlas_match:
-                    state["barangay"] = philatlas_match['name'].title()
-                    philatlas_used = True
-                    logger.info(f"✓ Barangay validated via PhilAtlas: {state['barangay']}")
-                    new_reasons.append(f"Barangay verified via PhilAtlas (not found in PSGC)")
+            
+            if barangay_match_philatlas:
+                state["barangay"] = barangay_match_philatlas['name'].title().strip()
+                philatlas_used = True
+                logger.info(f"✓ Barangay validated via PhilAtlas: {state['barangay']}")
+                # Get PSGC code for internal use
+                barangay_match = self.psgc_client.search_barangay(state["barangay"], city_code)
+                if barangay_match:
+                    state["barangay_code"] = barangay_match.get('code')
+            else:
+                # Fallback to PSGC
+                barangay_match = self.psgc_client.search_barangay(state["barangay"], city_code)
+                if barangay_match:
+                    state["barangay"] = barangay_match.get('name', '').title().strip()
+                    state["barangay_code"] = barangay_match.get('code')
+                    logger.info(f"✓ Barangay validated via PSGC: {state['barangay']} ({state['barangay_code']})")
                 else:
-                    reason = f"Barangay '{state['barangay']}' not found in PSGC API or PhilAtlas"
+                    reason = f"Barangay '{state['barangay']}' not found in database"
                     if reason not in state["reasons"]:
                         new_reasons.append(reason)
-                    state["barangay"] = state["barangay"].title()
+                    state["barangay"] = state["barangay"].title().strip()
                     psgc_api_valid = False
-            else:
-                reason = f"Barangay '{state['barangay']}' not found in PSGC API"
-                if reason not in state["reasons"]:
-                    new_reasons.append(reason)
-                state["barangay"] = state["barangay"].title()
-                psgc_api_valid = False
         
         if new_reasons:
             state["reasons"].extend(new_reasons)
         
-        # Mark as validated if PSGC succeeded OR PhilAtlas provided verification
+        # Mark as validated if either source succeeded
         state["psgc_api_validated"] = psgc_api_valid or philatlas_used
-        if philatlas_used and not psgc_api_valid:
-            logger.info("⚠ PSGC validation failed but PhilAtlas provided verification - marking as partially validated")
+        if philatlas_used:
+            logger.info("✓ Address components validated using PhilAtlas")
         
         if all([state["street_address"], state["barangay"], state["city"], state["province"]]):
             state["formatted_address"] = self._format_ph_address(state)
@@ -949,15 +1032,54 @@ class AddressValidatorAgent:
         return parsed
     
     def _format_ph_address(self, state: ValidationState) -> str:
-        """Format Philippine address components."""
+        """Format Philippine address components and remove duplicates."""
         components = []
         
-        if state["street_address"]:
-            components.append(state["street_address"])
-        if state["barangay"]:
-            components.append(state["barangay"])
-        if state["city"]:
-            components.append(state["city"])
+        street_address = state["street_address"]
+        barangay = state["barangay"]
+        
+        # Remove duplicate words between street address and barangay
+        if street_address and barangay:
+            # Split both into words and compare
+            street_words = street_address.strip().split()
+            barangay_words = barangay.replace("-", " ").split()
+            
+            # Remove trailing words from street address that appear in barangay
+            # This handles cases like "...Bar Funda" when barangay is "Funda-Dalipe"
+            cleaned_street_words = []
+            for word in street_words:
+                # Check if this word (case-insensitive) appears in barangay
+                word_lower = word.lower()
+                barangay_words_lower = [w.lower() for w in barangay_words]
+                
+                # If word is not in barangay, keep it
+                if word_lower not in barangay_words_lower:
+                    cleaned_street_words.append(word)
+                else:
+                    # This word appears in barangay - check if it's at the end
+                    # Only remove if it's one of the trailing words
+                    remaining_words = street_words[street_words.index(word):]
+                    remaining_lower = [w.lower() for w in remaining_words]
+                    
+                    # If all remaining words are in barangay, stop here
+                    if all(w in barangay_words_lower for w in remaining_lower):
+                        break
+                    else:
+                        cleaned_street_words.append(word)
+            
+            street_address = " ".join(cleaned_street_words).strip()
+            
+            # Update the state with cleaned street address
+            state["street_address"] = street_address
+        
+        if street_address:
+            components.append(street_address)
+        if barangay:
+            components.append(barangay)
+        # Use original parsed city name for formatted address (e.g., "San Jose De Buenavista")
+        city_for_format = state.get("original_city") or state["city"]
+        if city_for_format:
+            components.append(city_for_format)
         if state["province"]:
             components.append(state["province"])
         if state["postal_code"]:
@@ -986,7 +1108,7 @@ class AddressValidatorAgent:
         
         reasons = unique_reasons
         is_non_ph_rejection = any("only validate Philippine addresses" in reason for reason in reasons)
-        has_psgc_api_errors = any("not found in PSGC API" in reason for reason in reasons)
+        has_psgc_api_errors = any("not found in database" in reason for reason in reasons)
         
         if is_non_ph_rejection:
             is_valid = False

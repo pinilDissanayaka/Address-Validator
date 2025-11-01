@@ -341,6 +341,11 @@ class PSGCAPIClient:
             variations.append(clean_name)
             variations.append(f"municipality of {clean_name}")
         
+        # NOTE: Compound name splitting removed to prevent false matches
+        # Previously split "San Jose De Buenavista" -> "San Jose"
+        # This caused false matches when both "San Jose" and "San Jose De Buenavista" exist
+        # The fuzzy matching and substring matching logic handles these cases better
+        
         return list(set(variations))  # Remove duplicates
     
     def search_city_municipality(self, name: str, province_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -382,13 +387,13 @@ class PSGCAPIClient:
                     logger.info(f"Found city/municipality via substring match in province: {location['name']}")
                     return location
             
-            # Fuzzy match in province
+            # Fuzzy match in province - use HIGH threshold to avoid false matches
             best_match = None
             best_score = 0.0
             
             for location in filtered_locations:
                 score = self._fuzzy_match(normalized_query, location['name'])
-                if score > best_score and score >= 0.70:  # Lowered from 0.75 for better typo tolerance
+                if score > best_score and score >= 0.95:  # Agent reasoning: Only accept very high confidence matches
                     best_score = score
                     best_match = location
             
@@ -428,7 +433,7 @@ class PSGCAPIClient:
         
         for location in all_locations:
             score = self._fuzzy_match(normalized_query, location['name'])
-            if score > best_score and score >= 0.70:  # Lowered from 0.75 for better typo tolerance
+            if score > best_score and score >= 0.95:  # Agent reasoning: Only accept very high confidence matches
                 best_score = score
                 best_match = location
         
@@ -474,12 +479,12 @@ class PSGCAPIClient:
                             logger.info(f"Found exact barangay match in city: {barangay['name']}")
                             return barangay
                     
-                    # Fuzzy match
+                    # Fuzzy match - use HIGH threshold to avoid false matches
                     best_match = None
                     best_score = 0.0
                     for barangay in city_barangays:
                         score = self._fuzzy_match(normalized_query, barangay['name'])
-                        if score > best_score and score >= 0.70:  # Lowered from 0.75 for better typo tolerance
+                        if score > best_score and score >= 0.95:  # Agent reasoning: Only accept very high confidence matches
                             best_score = score
                             best_match = barangay
                     
@@ -512,11 +517,46 @@ class PSGCAPIClient:
         
         # Try compound name variations if city provided
         if city_municipality_code:
-            variations = [name]
-            if '-' not in name:
-                for prefix in ['Funda-', 'San-', 'Santa-', 'Santo-']:
-                    variations.append(f"{prefix}{name}")
+            variations = []
             
+            # If no hyphen, try common compound patterns
+            if '-' not in name:
+                # Common prefixes for compound barangays
+                common_prefixes = [
+                    'San', 'Santa', 'Santo', 'Sto', 'Sta',
+                    'Barangay', 'Brgy', 'Upper', 'Lower',
+                    'East', 'West', 'North', 'South'
+                ]
+                
+                # Common suffixes/second parts
+                common_suffixes = [
+                    'Poblacion', 'Proper', 'District', 'Norte', 'Sur', 
+                    'Este', 'Oeste', 'Central', 'Old', 'New'
+                ]
+                
+                # Try with common prefixes
+                for prefix in common_prefixes:
+                    variations.append(f"{prefix}-{name}")
+                    variations.append(f"{name}-{prefix}")
+                
+                # Try with common suffixes
+                for suffix in common_suffixes:
+                    variations.append(f"{name}-{suffix}")
+                
+                # Special case: Funda could be Funda-Dalipe, Funda-Daco, etc.
+                if name.lower() == 'funda':
+                    variations.extend(['Funda-Dalipe', 'Funda-Daco'])
+                
+                # Special case: Try generic second parts
+                variations.extend([
+                    f"{name}-I", f"{name}-II", f"{name}-III",
+                    f"{name}-A", f"{name}-B", f"{name}-C"
+                ])
+            
+            # Also try the original name
+            variations.insert(0, name)
+            
+            # Try each variation
             for variation in variations:
                 try:
                     url = f"{self.BASE_URL}/barangays/{variation}"
@@ -526,7 +566,7 @@ class PSGCAPIClient:
                         result = response.json()
                         barangay_data = result.get('data')
                         if barangay_data and barangay_data['code'].startswith(city_municipality_code[:6]):
-                            logger.info(f"Found barangay via compound name: {barangay_data['name']}")
+                            logger.info(f"Found barangay via compound name variation: {barangay_data['name']} (from '{name}')")
                             return barangay_data
                 except Exception as e:
                     logger.debug(f"Variation lookup failed for {variation}: {e}")

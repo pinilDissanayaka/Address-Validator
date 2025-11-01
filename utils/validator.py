@@ -129,7 +129,12 @@ class AddressValidator:
             # Apply typo corrections before other processing
             if self.typo_handler:
                 # Use smart typo handler (dynamic, learns from PSGC data)
-                parsed = self.typo_handler.apply_corrections(parsed, self.psgc_client)
+                parsed, typo_suggestions = self.typo_handler.apply_corrections(parsed, self.psgc_client)
+                
+                # Capture suggestions from typo handler
+                if typo_suggestions:
+                    temp_data["suggestion"] = temp_data.get("suggestion", [])
+                    temp_data["suggestion"].extend(typo_suggestions)
             else:
                 # Fallback to basic hardcoded corrections
                 parsed = apply_common_corrections(parsed)
@@ -149,7 +154,9 @@ class AddressValidator:
             
             if all([temp_data.get("streetAddress"), temp_data.get("barangay"), 
                     temp_data.get("city"), temp_data.get("province")]):
-                temp_data["formattedAddress"] = self._format_ph_address(temp_data)
+                formatted_addr, cleaned_street = self._format_ph_address(temp_data)
+                temp_data["formattedAddress"] = formatted_addr
+                temp_data["streetAddress"] = cleaned_street
                 temp_data["structureOk"] = True
         
         if temp_data["country"] in ["PH", "NOT_PH"] and self.gmaps_validator:
@@ -178,7 +185,9 @@ class AddressValidator:
                 
                 if all([temp_data.get("streetAddress"), temp_data.get("barangay"), 
                         temp_data.get("city"), temp_data.get("province")]):
-                    temp_data["formattedAddress"] = self._format_ph_address(temp_data)
+                    formatted_addr, cleaned_street = self._format_ph_address(temp_data)
+                    temp_data["formattedAddress"] = formatted_addr
+                    temp_data["streetAddress"] = cleaned_street
                     temp_data["structureOk"] = True
         
         if self.db_available:
@@ -373,14 +382,40 @@ class AddressValidator:
         
         return result
     
-    def _format_ph_address(self, temp_data: Dict) -> str:
-        """Format Philippine address components."""
+    def _format_ph_address(self, temp_data: Dict) -> Tuple[str, str]:
+        """Format Philippine address components and return (formatted_address, cleaned_street_address)."""
         components = []
         
-        if temp_data.get("streetAddress"):
-            components.append(temp_data["streetAddress"])
-        if temp_data.get("barangay"):
-            components.append(temp_data["barangay"])
+        street_address = temp_data.get("streetAddress", "")
+        barangay = temp_data.get("barangay", "")
+        
+        if street_address and barangay:
+            # Split both into words and compare
+            street_words = street_address.strip().split()
+            barangay_words = barangay.replace("-", " ").split()
+            
+            cleaned_street_words = []
+            for word in street_words:
+                word_lower = word.lower()
+                barangay_words_lower = [w.lower() for w in barangay_words]
+                
+                if word_lower not in barangay_words_lower:
+                    cleaned_street_words.append(word)
+                else:
+                    remaining_words = street_words[street_words.index(word):]
+                    remaining_lower = [w.lower() for w in remaining_words]
+                    
+                    if all(w in barangay_words_lower for w in remaining_lower):
+                        break
+                    else:
+                        cleaned_street_words.append(word)
+            
+            street_address = " ".join(cleaned_street_words).strip()
+        
+        if street_address:
+            components.append(street_address)
+        if barangay:
+            components.append(barangay)
         if temp_data.get("city"):
             components.append(temp_data["city"])
         if temp_data.get("province"):
@@ -390,7 +425,7 @@ class AddressValidator:
         components.append("PH")
         
         formatted = " ".join(components)
-        return re.sub(r"\s+", " ", formatted).strip()
+        return re.sub(r"\s+", " ", formatted).strip(), street_address
     
     def _geocode_address(self, temp_data: Dict, original_address: str) -> Dict:
         """Geocode the address using Google Maps."""

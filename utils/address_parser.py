@@ -57,11 +57,17 @@ class AddressParser:
                 11. District/subdivision names (like "Camarin", "Tondo", "Sampaloc") are NOT official barangay names - look for numbers nearby
                 12. If you see both a district name AND a number, prioritize the NUMBER as the barangay (e.g., "Camarin 175" = "Barangay 175")
                 13. Format numbered barangays as "Barangay [number]" (e.g., "Barangay 175", not just "175")
-                14. Examples:
+                14. COMPOUND BARANGAY NAMES: Many barangays have COMPOUND names with hyphens (e.g., "FUNDA-DALIPE", "SAN-JOSE-RIZAL", "PALA-O")
+                15. When you see a partial name that could be part of a compound barangay (e.g., "Funda"), it may be "FUNDA-DALIPE" or similar
+                16. If the parsed partial name seems incomplete or is followed by comma/city, leave it as-is for the validator to check compound variations
+                17. Common compound patterns: [NAME1]-[NAME2], [PREFIX]-[SUFFIX]
+                18. Examples:
                     - "Camarin 175 Caloocan" → barangay: "Barangay 175"
                     - "Block 3 Lot 11 Franville II Camarin 175 Caloocan" → barangay: "Barangay 175"
                     - "Tondo 105 Manila" → barangay: "Barangay 105"
                     - "Barangay Libis Quezon City" → barangay: "Libis"
+                    - "Funda, San Jose De Buenavista" → barangay: "Funda" (validator will check for "Funda-Dalipe")
+                    - "Pala-O, Iligan City" → barangay: "Pala-O"
 
                 {format_instructions}
 

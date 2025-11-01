@@ -1,4 +1,5 @@
 """
+
 Smart Typo Handler - Dynamic fuzzy matching without hardcoded corrections.
 Uses RapidFuzz for fast fuzzy string matching and phonetic algorithms.
 """
@@ -331,9 +332,10 @@ class SmartTypoHandler:
             psgc_client: PSGCAPIClient instance
             
         Returns:
-            Modified parsed_address with corrections applied
+            Modified parsed_address with corrections applied and a list of suggestions
         """
         corrections_made = []
+        suggestions = []
         
         # Correct province
         if hasattr(parsed_address, 'province') and parsed_address.province:
@@ -352,20 +354,46 @@ class SmartTypoHandler:
                         province_code = p['code']
                         break
             
+            original_city = parsed_address.city
             corrected, score = self.correct_city(parsed_address.city, psgc_client, province_code)
             if corrected and corrected != parsed_address.city:
                 corrections_made.append(f"City: '{parsed_address.city}' -> '{corrected}' (confidence: {score:.0f}%)")
+                
+                # Add suggestion if the city name was significantly shortened
+                if len(original_city) > len(corrected) + 5:
+                    suggestions.append(
+                        f"City name standardized from '{original_city}' to official name '{corrected}'"
+                    )
+                
                 parsed_address.city = corrected
         
         # Correct barangay (with city context if available)
         if hasattr(parsed_address, 'barangay') and parsed_address.barangay:
             city_code = None
             if hasattr(parsed_address, 'city') and parsed_address.city:
+                # First try exact match
                 cities = psgc_client.get_all_cities()
                 for c in cities:
                     if c['name'].lower() == parsed_address.city.lower():
                         city_code = c['code']
                         break
+                
+                # If no exact match, use PSGC search which handles variations
+                if not city_code:
+                    # Get province code if available
+                    province_code = None
+                    if hasattr(parsed_address, 'province') and parsed_address.province:
+                        provinces = psgc_client.get_all_provinces()
+                        for p in provinces:
+                            if p['name'].lower() == parsed_address.province.lower():
+                                province_code = p['code']
+                                break
+                    
+                    # Use search_city_municipality which handles name variations
+                    city_result = psgc_client.search_city_municipality(parsed_address.city, province_code)
+                    if city_result:
+                        city_code = city_result.get('code')
+                        logger.debug(f"Found city code using search: {parsed_address.city} -> {city_code}")
             
             if city_code:
                 corrected, score = self.correct_barangay(parsed_address.barangay, psgc_client, city_code)
@@ -376,4 +404,5 @@ class SmartTypoHandler:
         if corrections_made:
             logger.info(f"Smart typo corrections applied: {'; '.join(corrections_made)}")
         
-        return parsed_address
+        # Return both the parsed address and suggestions
+        return parsed_address, suggestions

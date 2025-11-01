@@ -556,6 +556,7 @@ class PhilAtlasClient:
         
         barangays = self.get_barangays(city_data['url'])
         
+        # Try exact match first
         for barangay in barangays:
             if self._normalize_name(barangay['name']) == normalized_query:
                 logger.info(f"Found exact barangay match: {barangay['name']}")
@@ -563,6 +564,20 @@ class PhilAtlasClient:
                 barangay['province'] = city_data.get('province', province_name)
                 return barangay
         
+        # Try compound name matching - check if query is start of a compound barangay name
+        # e.g., "Funda" should match "Funda-Dalipe"
+        for barangay in barangays:
+            barangay_normalized = self._normalize_name(barangay['name'])
+            # Check if query is the first part of a hyphenated compound name
+            if '-' in barangay_normalized:
+                first_part = barangay_normalized.split('-')[0].strip()
+                if first_part == normalized_query:
+                    logger.info(f"Found compound barangay match: {barangay['name']} (from partial '{name}')")
+                    barangay['city'] = city_data['name']
+                    barangay['province'] = city_data.get('province', province_name)
+                    return barangay
+        
+        # Try fuzzy matching
         best_match = None
         best_score = 0.0
         
