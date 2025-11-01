@@ -98,12 +98,13 @@ class LLMAddressValidatorAgent:
                 }
             },
             {
-                "name": "fuzzy_match_component",
-                "description": "Use fuzzy matching to find closest match for a component (province, city, or barangay) when exact match fails. Returns best match with confidence score.",
+                "name": "llm_correct_typo",
+                "description": "Use LLM intelligence to identify and correct typos/spelling errors in address components. Smarter than fuzzy matching - understands context and common variations.",
                 "parameters": {
                     "component_type": "string - 'province', 'city', or 'barangay'",
-                    "component_value": "string - the value to match",
-                    "context": "dict - optional context like province_code for city/barangay search"
+                    "incorrect_value": "string - the component value that failed exact match",
+                    "context": "dict - context like province_name, city_name to narrow possibilities",
+                    "failed_search_results": "string - optional info about what was tried"
                 }
             },
             {
@@ -187,7 +188,7 @@ class LLMAddressValidatorAgent:
                         "success": True,
                         "found": True,
                         "data": {
-                            "name": city.get("name"),
+                            "name": city.get("name", "").strip(),  # Remove trailing spaces
                             "code": city.get("code"),
                             "zip_code": city.get("zip_code")
                         }
@@ -222,66 +223,98 @@ class LLMAddressValidatorAgent:
                     }
                 return {"success": True, "found": False, "data": None}
             
-            elif tool_name == "fuzzy_match_component":
-                # Use smart typo handler for fuzzy matching
+            elif tool_name == "llm_correct_typo":
+                if not self.llm_available:
+                    return {"success": False, "error": "LLM not available for typo correction"}
+                
                 try:
-                    from utils.smart_typo_handler import SmartTypoHandler
-                    
-                    typo_handler = SmartTypoHandler(min_score=85, phonetic_enabled=True)
                     component_type = parameters["component_type"]
-                    component_value = parameters["component_value"]
+                    incorrect_value = parameters["incorrect_value"]
                     context = parameters.get("context", {})
                     
+                    # Get candidate list from database
+                    candidates = []
                     if component_type == "province":
-                        corrected, score = typo_handler.correct_province(
-                            component_value, 
-                            self.psgc_client
-                        )
-                        if corrected:
-                            return {
-                                "success": True,
-                                "found": True,
-                                "original": component_value,
-                                "corrected": corrected,
-                                "confidence": score
-                            }
+                        all_provinces = self.psgc_client.get_all_provinces()
+                        candidates = [p["name"] for p in all_provinces[:50]]  # Top 50 for token efficiency
                     
                     elif component_type == "city":
-                        province_code = context.get("province_code")
-                        corrected, score = typo_handler.correct_city(
-                            component_value,
-                            self.psgc_client,
-                            province_code
-                        )
-                        if corrected:
-                            return {
-                                "success": True,
-                                "found": True,
-                                "original": component_value,
-                                "corrected": corrected,
-                                "confidence": score
-                            }
+                        province_name = context.get("province_name")
+                        if province_name:
+                            province = self.psgc_client.search_province(province_name)
+                            if province:
+                                all_cities = self.psgc_client.get_all_cities()
+                                candidates = [c["name"] for c in all_cities if c["code"].startswith(province["code"][:4])][:30]
                     
                     elif component_type == "barangay":
-                        city_code = context.get("city_code")
-                        corrected, score = typo_handler.correct_barangay(
-                            component_value,
-                            self.psgc_client,
-                            city_code
-                        )
-                        if corrected:
-                            return {
-                                "success": True,
-                                "found": True,
-                                "original": component_value,
-                                "corrected": corrected,
-                                "confidence": score
-                            }
+                        city_name = context.get("city_name")
+                        province_name = context.get("province_name")
+                        if city_name and province_name:
+                            province = self.psgc_client.search_province(province_name)
+                            if province:
+                                city = self.psgc_client.search_city_municipality(city_name, province.get("code"))
+                                if city:
+                                    all_barangays = self.psgc_client.get_all_barangays()
+                                    candidates = [b["name"] for b in all_barangays if b["code"].startswith(city["code"][:7])][:50]
                     
-                    return {"success": True, "found": False, "data": None}
+                    if not candidates:
+                        return {"success": True, "found": False, "reason": "No candidates found for correction"}
+                    
+                    # Use LLM to find the best match
+                    correction_prompt = f"""You are correcting a typo in a Philippine address component.
+
+**Component Type**: {component_type}
+**Incorrect Value**: {incorrect_value}
+**Context**: {context}
+
+**Possible Correct Values**:
+{', '.join(candidates[:20])}  {'...(and more)' if len(candidates) > 20 else ''}
+
+**Task**: Identify which candidate is the correct value for the typo "{incorrect_value}".
+Consider:
+- Spelling variations (Cordoba/Cordova, Osmeña/Osmena)
+- Double letters (Hippodromo/Hipodromo)
+- Missing/extra letters
+- Phonetic similarities
+- Common abbreviations
+
+**Response Format (JSON only)**:
+{{
+    "corrected": "exact name from candidates list or null if no good match",
+    "confidence": 0-100 (how confident you are),
+    "reasoning": "brief explanation of why this is the correct match"
+}}
+
+Respond with ONLY the JSON object.
+"""
+                    
+                    response = self.llm.invoke(correction_prompt)
+                    response_text = response.content.strip()
+                    
+                    # Extract JSON
+                    if "```json" in response_text:
+                        response_text = response_text.split("```json")[1].split("```")[0].strip()
+                    elif "```" in response_text:
+                        response_text = response_text.split("```")[1].split("```")[0].strip()
+                    
+                    result = json.loads(response_text)
+                    
+                    if result.get("corrected") and result.get("confidence", 0) >= 70:
+                        logger.info(f"LLM typo correction: '{incorrect_value}' → '{result['corrected']}' ({result['confidence']}%)")
+                        return {
+                            "success": True,
+                            "found": True,
+                            "original": incorrect_value,
+                            "corrected": result["corrected"],
+                            "confidence": result["confidence"],
+                            "reasoning": result.get("reasoning")
+                        }
+                    
+                    return {"success": True, "found": False, "reason": "No confident match found"}
                 
-                except ImportError:
-                    return {"success": False, "error": "Smart typo handler not available"}
+                except Exception as e:
+                    logger.error(f"LLM typo correction failed: {e}")
+                    return {"success": False, "error": str(e)}
             
             elif tool_name == "philatlas_search":
                 if not self.philatlas_client:
@@ -617,9 +650,9 @@ Respond with ONLY the JSON object, no additional text.
    - IMPORTANT: Keep complete city names intact (e.g., "San Jose De Buenavista", not "San Jose")
    - Many Philippine cities have compound names - do NOT truncate them
    
-2. **Second Priority - Fuzzy Matching (if exact fails):**
-   - Use fuzzy_match_component for potential typos
-   - This tool handles phonetic matching (Cordoba/Cordova) and spelling errors
+2. **Second Priority - LLM Typo Correction (if exact fails):**
+   - Use llm_correct_typo for potential typos and spelling variations
+   - LLM understands context better: (Cordoba/Cordova, Hippodromo/Hipodromo, Osmeña/Osmena)
    
 3. **Third Priority - Cross-Validation:**
    - Use verify_geographic_hierarchy to ensure barangay ∈ city ∈ province
@@ -634,7 +667,8 @@ Respond with ONLY the JSON object, no additional text.
    - Use get_postal_code if still missing
 
 **Smart Decision Making:**
-- If exact search fails, IMMEDIATELY try fuzzy_match_component (don't wait for next iteration)
+- If exact search fails, IMMEDIATELY try llm_correct_typo (don't wait for next iteration)
+- LLM typo correction is smarter than fuzzy matching - it understands Philippine address patterns
 - Call verify_geographic_hierarchy after getting province/city/barangay to confirm they match
 - Use geocoding when components are missing or to cross-validate
 - Check delivery history for addresses with successful deliveries (confidence boost)
@@ -665,11 +699,15 @@ Respond with ONLY the JSON object, no additional text.
 }}
 
 **Confidence Scoring Guidelines:**
-- 90-100: All components validated with exact matches + hierarchy verified + geocoded
-- 70-89: All major components (province, city) validated, barangay might be fuzzy matched
-- 50-69: Major components validated but hierarchy not verified or missing barangay
-- 30-49: Some components validated but significant gaps
+- 90-100: All components validated with exact matches + hierarchy verified
+- 80-89: Province, city, barangay all validated (exact or fuzzy match with high score >90%)
+- 70-79: Province and city validated, barangay fuzzy matched or missing but address is deliverable
+- 60-69: Province and city validated with codes, barangay not validated but address still usable
+- 50-59: Province and city validated but missing codes or barangay
+- 30-49: Only province validated or major components have issues
 - 0-29: Few or no components validated
+
+**Important**: Fuzzy matches with >90% similarity are as good as exact matches!
 
 **Important Guidelines:**
 - Be proactive: if exact match fails, immediately try fuzzy matching in the SAME iteration
@@ -910,8 +948,10 @@ Respond with ONLY the JSON object, no additional text.
             
             formatted_address = ", ".join(formatted_parts)
             
-            # Determine validity
-            is_valid = confidence >= 70
+            # Determine validity - smarter logic
+            # Valid if: high confidence OR (medium confidence + province & city validated)
+            has_province_city = bool(final_components.get("province_code") and final_components.get("city_code"))
+            is_valid = confidence >= 70 or (confidence >= 60 and has_province_city)
             geocode_matched = geocode_data is not None
             delivery_success = bool(delivery_data and delivery_data.get("successful", 0) > 0)
             
